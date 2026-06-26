@@ -1,5 +1,5 @@
 'use client'
-import { useCallback, useEffect, useMemo, useState, type MouseEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/contexts/AuthContext'
 import { mondayOf, addDays, toISODate, getISOWeek, semanaDesde, fmtHora } from '@/lib/fechas'
@@ -18,6 +18,11 @@ type Linea = (typeof LINEAS)[number]
 // Alto del timeline de un día (24h). 20px por hora.
 const DIA_H = 480
 const HORA_INICIO_DEFAULT = 6   // si el día está vacío, la primera WO arranca 06:00
+
+// Lock por línea (F1b): heartbeat cada 3 min; el lock vence a los 10 min sin refresco.
+const LOCK_TTL_MS  = 10 * 60 * 1000
+const HEARTBEAT_MS = 3 * 60 * 1000
+interface LockRow { linea: string; usuario_email: string; usuario_nombre: string | null; last_seen: string }
 
 // ── Tipos ────────────────────────────────────────────────────────────────────
 interface WoBacklog {
@@ -127,6 +132,8 @@ export default function ProgramadorPage() {
   const [dragWo, setDragWo]   = useState<string | null>(null)
   const [info, setInfo]       = useState<{ id: number; x: number; y: number } | null>(null)
   const [dragBlock, setDragBlock] = useState<number | null>(null)
+  const [locks, setLocks]     = useState<Record<string, LockRow>>({})
+  const heldRef = useRef<Set<string>>(new Set())
 
   const dias = useMemo(() => semanaDesde(monday), [monday])
 
@@ -243,6 +250,78 @@ export default function ProgramadorPage() {
   }, [monday])
 
   useEffect(() => { cargar() }, [cargar])
+
+  // ── Lock por línea (F1b): solo 1 programador edita una línea a la vez ─────────
+  async function loadLocks() {
+    const { data } = await supabase
+      .from('linea_edicion').select('linea,usuario_email,usuario_nombre,last_seen')
+    const map: Record<string, LockRow> = {}
+    ;(data ?? []).forEach(r => { const rr = r as LockRow; map[rr.linea] = rr })
+    setLocks(map)
+  }
+
+  async function tomarLinea(L: Linea) {
+    if (!isAdmin || !perfil?.email) return
+    // No robar si otra persona la tiene activa (dentro del TTL)
+    const { data: r } = await supabase
+      .from('linea_edicion').select('usuario_email,last_seen').eq('linea', L).maybeSingle()
+    const row = r as { usuario_email: string; last_seen: string } | null
+    if (row && row.usuario_email !== perfil.email &&
+        Date.now() - new Date(row.last_seen).getTime() < LOCK_TTL_MS) {
+      loadLocks(); return
+    }
+    await supabase.from('linea_edicion').upsert({
+      linea: L, usuario_email: perfil.email, usuario_nombre: perfil.nombre,
+      last_seen: new Date().toISOString(),
+    }, { onConflict: 'linea' })
+    heldRef.current.add(L)
+    loadLocks()
+  }
+
+  // Carga inicial de locks + Realtime + poll de respaldo (por si Realtime no está activo)
+  useEffect(() => {
+    loadLocks()
+    const poll = setInterval(loadLocks, 30000)
+    const ch = supabase.channel('rt-linea-edicion')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'linea_edicion' }, () => loadLocks())
+      .subscribe()
+    return () => { clearInterval(poll); supabase.removeChannel(ch) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Al entrar a una línea (admin), tomar el lock
+  useEffect(() => {
+    if (linea && isAdmin) tomarLinea(linea)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linea, isAdmin, perfil?.email])
+
+  // Heartbeat: refrescar last_seen de las líneas tomadas
+  useEffect(() => {
+    if (!isAdmin || !perfil?.email) return
+    const email = perfil.email
+    const id = setInterval(() => {
+      ;[...heldRef.current].forEach(L => {
+        supabase.from('linea_edicion').update({ last_seen: new Date().toISOString() })
+          .eq('linea', L).eq('usuario_email', email).then(() => {})
+      })
+    }, HEARTBEAT_MS)
+    return () => clearInterval(id)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, perfil?.email])
+
+  // Liberar las líneas tomadas al salir / cerrar la pestaña
+  useEffect(() => {
+    const release = () => {
+      const email = perfil?.email
+      if (!email) return
+      ;[...heldRef.current].forEach(L => {
+        supabase.from('linea_edicion').delete().eq('linea', L).eq('usuario_email', email).then(() => {})
+      })
+    }
+    window.addEventListener('beforeunload', release)
+    return () => { window.removeEventListener('beforeunload', release); release() }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [perfil?.email])
 
   // ── Programar una WO (drop sobre un día) ─────────────────────────────────────
   async function programar(wo: WoBacklog, fechaIso: string) {
@@ -366,7 +445,18 @@ export default function ProgramadorPage() {
   )
 
   const infoBlock = info ? (programadas.find(p => p.id === info.id) ?? null) : null
-  const puedeEditar = isAdmin   // F1b agregará el lock por línea
+
+  // Lock vigente de una línea (null si no hay o si venció el TTL)
+  const lockVigenteDe = (l: string): LockRow | null => {
+    const lk = locks[l]
+    return lk && Date.now() - new Date(lk.last_seen).getTime() < LOCK_TTL_MS ? lk : null
+  }
+  const lockDeOtro = (l: string): LockRow | null => {
+    const lk = lockVigenteDe(l)
+    return lk && lk.usuario_email !== (perfil?.email ?? '') ? lk : null
+  }
+  const editaOtro  = linea ? lockDeOtro(linea) : null
+  const puedeEditar = isAdmin && !!linea && !editaOtro
 
   // Pantalla de selección de línea al entrar
   if (linea === null) {
@@ -380,8 +470,11 @@ export default function ProgramadorPage() {
         <div className="flex items-center gap-1.5 flex-wrap">
           <button onClick={() => setLinea(null)} title="Cambiar de línea"
             className="px-2.5 py-2 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-500 text-sm">⟵</button>
-          {!puedeEditar && (
+          {!isAdmin && (
             <span className="text-[11px] font-medium px-2 py-1 rounded-full bg-amber-100 text-amber-800">Solo lectura</span>
+          )}
+          {isAdmin && !editaOtro && (
+            <span className="text-[11px] font-medium px-2 py-1 rounded-full bg-emerald-100 text-emerald-700">Editás vos</span>
           )}
           {LINEAS.map(l => {
             const n = programadas.filter(p => p.linea === l).length
@@ -401,6 +494,9 @@ export default function ProgramadorPage() {
                     linea === l ? 'bg-red-800' : 'bg-stone-300 text-stone-700'
                   }`}>{n}</span>
                 )}
+                {lockDeOtro(l) && (
+                  <span className="ml-1" title={`La edita ${lockDeOtro(l)!.usuario_nombre || lockDeOtro(l)!.usuario_email}`}>🔒</span>
+                )}
               </button>
             )
           })}
@@ -418,6 +514,13 @@ export default function ProgramadorPage() {
             className="px-3 py-1.5 rounded-lg bg-stone-800 text-white text-sm font-medium">Hoy</button>
         </div>
       </div>
+
+      {editaOtro && (
+        <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          <span className="text-base">🔒</span>
+          La línea <b>{linea}</b> la está editando <b>{editaOtro.usuario_nombre || editaOtro.usuario_email}</b>. Estás en modo solo lectura.
+        </div>
+      )}
 
       <div className="grid grid-cols-[280px_1fr] gap-4">
         {/* ── Backlog ── */}
