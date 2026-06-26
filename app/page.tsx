@@ -40,8 +40,28 @@ interface Programada {
   setup_min: number
   orden_en_dia: number
   descripcion: string | null
-  cajas: number | null
+  cajas: number | null            // cantidad de SISTEMA (ope_ordenes) al programar
+  cajas_ajustado: number | null   // ajuste manual; null = usar la de sistema
   fraccionado: string | null
+}
+
+// Cajas efectivas: el ajuste manual si existe, si no la de sistema.
+function cajasEf(p: Programada): number {
+  return p.cajas_ajustado ?? (p.cajas ?? 0)
+}
+
+// Recalcula la cadena de un día/línea: cada bloque arranca donde terminó el anterior,
+// recalculando la duración con las cajas efectivas. Devuelve los bloques actualizados.
+function recalcCadena(delDia: Programada[], lineaKey: string, fechaIso: string, m: DuracionMaps): Programada[] {
+  const sorted = [...delDia].sort((a, b) => a.orden_en_dia - b.orden_en_dia)
+  let prevFin: Date | null = null
+  return sorted.map((p, i) => {
+    const inicio = prevFin ?? new Date(`${fechaIso}T${String(HORA_INICIO_DEFAULT).padStart(2, '0')}:00:00`)
+    const dur = minutosProduccion(cajasEf(p), lineaKey, p.wo, m)
+    const fin = new Date(inicio.getTime() + (p.setup_min + dur) * 60000)
+    prevFin = fin
+    return { ...p, hora_inicio: inicio.toISOString(), hora_fin: fin.toISOString(), duracion_min: dur, orden_en_dia: i + 1 }
+  })
 }
 
 // ── Página ───────────────────────────────────────────────────────────────────
@@ -55,7 +75,7 @@ export default function ProgramadorPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch]   = useState('')
   const [dragWo, setDragWo]   = useState<string | null>(null)
-  const [info, setInfo]       = useState<{ p: Programada; x: number; y: number } | null>(null)
+  const [info, setInfo]       = useState<{ id: number; x: number; y: number } | null>(null)
 
   const dias = useMemo(() => semanaDesde(monday), [monday])
 
@@ -107,13 +127,55 @@ export default function ProgramadorPage() {
 
     const programadasData = (prog ?? []) as Programada[]
     const yaProg = new Set(programadasData.map(p => p.wo))
-
-    setProgramadas(programadasData)
-    setBacklog(woRows.filter(w => !yaProg.has(w.orden)))
-    setMaps(buildDuracionMaps(
+    const m = buildDuracionMaps(
       (velRes.data ?? []) as VelocidadRow[],
       (insRes.data ?? []) as InsumoBotellaRow[],
-    ))
+    )
+
+    // Merge: si el SISTEMA (ope_ordenes.cajas_jde) cambió la cantidad de una WO ya
+    // programada, se descarta el ajuste manual y se adopta la nueva de sistema.
+    let merged = programadasData
+    const progWos = [...new Set(programadasData.map(p => p.wo))]
+    if (progWos.length) {
+      const { data: sysRows } = await supabase
+        .from('ope_ordenes').select('orden,cajas_jde').in('orden', progWos)
+      const sysMap = new Map((sysRows ?? []).map(r => {
+        const rr = r as { orden: unknown; cajas_jde: unknown }
+        return [String(rr.orden), Number(rr.cajas_jde)]
+      }))
+      const diasTocados = new Set<string>()
+      merged = programadasData.map(p => {
+        const sys = sysMap.get(p.wo)
+        if (sys != null && !Number.isNaN(sys) && sys !== (p.cajas ?? 0)) {
+          diasTocados.add(`${p.linea}|${p.fecha}`)
+          return { ...p, cajas: sys, cajas_ajustado: null }
+        }
+        return p
+      })
+      if (diasTocados.size) {
+        for (const p of merged) {
+          const orig = programadasData.find(o => o.id === p.id)
+          if (orig && orig.cajas !== p.cajas) {
+            await supabase.from('produccion_programada').update({ cajas: p.cajas, cajas_ajustado: null }).eq('id', p.id)
+          }
+        }
+        for (const key of diasTocados) {
+          const [ln, fe] = key.split('|')
+          const recalced = recalcCadena(merged.filter(x => x.linea === ln && x.fecha === fe), ln, fe, m)
+          const byId = new Map(recalced.map(r => [r.id, r]))
+          merged = merged.map(x => byId.get(x.id) ?? x)
+          for (const rc of recalced) {
+            await supabase.from('produccion_programada').update({
+              hora_inicio: rc.hora_inicio, hora_fin: rc.hora_fin, duracion_min: rc.duracion_min, orden_en_dia: rc.orden_en_dia,
+            }).eq('id', rc.id)
+          }
+        }
+      }
+    }
+
+    setProgramadas(merged)
+    setBacklog(woRows.filter(w => !yaProg.has(w.orden)))
+    setMaps(m)
     setLoading(false)
   }, [monday])
 
@@ -172,6 +234,22 @@ export default function ProgramadorPage() {
     cargar()
   }
 
+  // ── Ajustar cajas de un bloque programado (recalcula la cadena del día) ───────
+  async function ajustarCajas(p: Programada, nuevo: number | null) {
+    const sys = p.cajas ?? 0
+    const ajustado = (nuevo == null || nuevo <= 0 || nuevo === sys) ? null : Math.round(nuevo)
+    const base = programadas.map(x => x.id === p.id ? { ...x, cajas_ajustado: ajustado } : x)
+    const recalced = recalcCadena(base.filter(x => x.linea === p.linea && x.fecha === p.fecha), p.linea, p.fecha, maps)
+    const byId = new Map(recalced.map(r => [r.id, r]))
+    setProgramadas(base.map(x => byId.get(x.id) ?? x))
+    await supabase.from('produccion_programada').update({ cajas_ajustado: ajustado }).eq('id', p.id)
+    for (const rc of recalced) {
+      await supabase.from('produccion_programada').update({
+        hora_inicio: rc.hora_inicio, hora_fin: rc.hora_fin, duracion_min: rc.duracion_min, orden_en_dia: rc.orden_en_dia,
+      }).eq('id', rc.id)
+    }
+  }
+
   // ── Backlog filtrado ────────────────────────────────────────────────────────
   const q = search.trim().toLowerCase()
   const backlogVisible = useMemo(() => backlog.filter(w =>
@@ -182,6 +260,8 @@ export default function ProgramadorPage() {
     () => programadas.filter(p => p.linea === linea),
     [programadas, linea]
   )
+
+  const infoBlock = info ? (programadas.find(p => p.id === info.id) ?? null) : null
 
   return (
     <div className="w-full">
@@ -321,7 +401,7 @@ export default function ProgramadorPage() {
 
                     {bloques.map(p => (
                       <Bloque key={p.id} p={p}
-                        onInfo={e => setInfo({ p, x: e.clientX, y: e.clientY })}
+                        onInfo={e => setInfo({ id: p.id, x: e.clientX, y: e.clientY })}
                         onQuitar={() => quitar(p)} />
                     ))}
                   </div>
@@ -339,7 +419,11 @@ export default function ProgramadorPage() {
       </p>
 
       {/* Popover de info al hacer click en un bloque */}
-      {info && <InfoPopover p={info.p} x={info.x} y={info.y} onClose={() => setInfo(null)} />}
+      {info && infoBlock && (
+        <InfoPopover p={infoBlock} x={info.x} y={info.y}
+          onClose={() => setInfo(null)}
+          onAjustar={v => ajustarCajas(infoBlock, v)} />
+      )}
     </div>
   )
 }
@@ -359,6 +443,11 @@ function Bloque({ p, onInfo, onQuitar }: {
   const h = Math.max(18, Math.min(rawH, DIA_H - top))
   const cruzaMedianoche = top + rawH > DIA_H
 
+  const adj   = p.cajas_ajustado != null
+  const ef    = cajasEf(p)
+  const sys   = p.cajas ?? 0
+  const arrow = adj ? (ef > sys ? '↑' : ef < sys ? '↓' : '') : ''
+
   return (
     <div className="group absolute left-0.5 right-0.5" style={{ top, height: h }}>
       <div
@@ -372,7 +461,10 @@ function Bloque({ p, onInfo, onQuitar }: {
           </div>
         )}
         {h > 44 && (
-          <div className="text-[9px] opacity-70 leading-tight truncate">{p.cajas?.toLocaleString('es-AR')} cj</div>
+          <div className="text-[9px] leading-tight truncate flex items-baseline gap-1">
+            {adj && <span className="opacity-50 line-through">{sys.toLocaleString('es-AR')}</span>}
+            <span className={adj ? 'font-semibold' : 'opacity-70'}>{arrow}{ef.toLocaleString('es-AR')} cj</span>
+          </div>
         )}
       </div>
       {/* ✕ al pasar el mouse · doble-click para quitar */}
@@ -390,9 +482,17 @@ function Bloque({ p, onInfo, onQuitar }: {
 }
 
 // ── Popover de info de un bloque (click) ──────────────────────────────────────
-function InfoPopover({ p, x, y, onClose }: { p: Programada; x: number; y: number; onClose: () => void }) {
+function InfoPopover({ p, x, y, onClose, onAjustar }: {
+  p: Programada; x: number; y: number; onClose: () => void; onAjustar: (nuevo: number | null) => void
+}) {
   const totalMin = p.setup_min + p.duracion_min
-  const W = 256, H = 250
+  const sys = p.cajas ?? 0
+  const ef  = cajasEf(p)
+  const adj = p.cajas_ajustado != null
+  const arrow = adj ? (ef > sys ? '↑' : ef < sys ? '↓' : '') : ''
+  const [val, setVal] = useState(String(ef))
+
+  const W = 256, H = 340
   const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
   const vh = typeof window !== 'undefined' ? window.innerHeight : 800
   const left = Math.max(8, Math.min(x, vw - W - 8))
@@ -413,9 +513,39 @@ function InfoPopover({ p, x, y, onClose }: { p: Programada; x: number; y: number
           <Row k="Total" v={`${totalMin} min`} />
           <Row k="Producción" v={`${p.duracion_min} min`} />
           <Row k="Setup" v={`${p.setup_min} min`} />
-          <Row k="Cajas" v={p.cajas != null ? p.cajas.toLocaleString('es-AR') : '—'} />
           <Row k="Fracc." v={p.fraccionado ?? '—'} />
         </dl>
+
+        {/* Cajas editable: original tachada + nueva con flecha */}
+        <div className="border-t border-stone-100 mt-2 pt-2">
+          <div className="text-stone-400 mb-1">Cajas</div>
+          <div className="flex items-baseline gap-2 mb-2">
+            {adj && <span className="text-stone-400 line-through tabular-nums">{sys.toLocaleString('es-AR')}</span>}
+            <span className={`text-lg font-bold tabular-nums ${adj ? (ef > sys ? 'text-amber-700' : 'text-emerald-700') : 'text-stone-800'}`}>
+              {arrow && <span className="mr-0.5">{arrow}</span>}{ef.toLocaleString('es-AR')}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <input
+              type="number" value={val} min={0}
+              onChange={e => setVal(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') onAjustar(Number(val) || 0) }}
+              className="flex-1 w-full border border-stone-200 rounded-md px-2 py-1 text-xs tabular-nums focus:outline-none focus:border-red-400"
+            />
+            <button onClick={() => onAjustar(Number(val) || 0)}
+              className="px-2.5 py-1 rounded-md bg-red-900 text-onbrand text-[11px] font-medium hover:bg-red-800 shrink-0">
+              Ajustar
+            </button>
+            {adj && (
+              <button onClick={() => { setVal(String(sys)); onAjustar(null) }} title="Volver a la cantidad de sistema"
+                className="px-2 py-1 rounded-md border border-stone-200 text-stone-500 text-[11px] hover:bg-stone-50 shrink-0">↺</button>
+            )}
+          </div>
+          <p className="text-[10px] text-stone-400 mt-1.5 leading-snug">
+            El ajuste se descarta solo cuando el sistema cambie esta cantidad.
+          </p>
+        </div>
+
         <p className="text-[10px] text-stone-400 mt-2 leading-snug">
           Para quitar: pasá el mouse sobre el bloque y doble-click en la ✕.
         </p>
