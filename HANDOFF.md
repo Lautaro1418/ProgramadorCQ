@@ -61,6 +61,23 @@ Next.js 16.2.6 (Turbopack) · React 19 · Tailwind 4 · `@supabase/supabase-js`.
 
 ## Estado actual — lo hecho (mas nuevo arriba)
 
+- **F2** (borrador / Plasmar): cada línea tiene un **programa oficial** (lo ven todos) y, para el programador
+  que la edita, un **borrador privado**. Al tomar el lock se **forkea** el oficial→borrador (`ensureDraft`);
+  los cambios (drag/mover/ajustar/quitar) van al borrador y **el resto sigue viendo el oficial**. Botón
+  **"Plasmar Programa"** promueve borrador→oficial (y re-forkea uno fresco para seguir editando); **"Descartar"**
+  vuelve al oficial. **Seguro por capability-flag**: si la columna `estado` NO existe (antes de la migración),
+  `draftEnabled=false` y la app se comporta EXACTAMENTE como antes (cero ruptura). `programadasVisible` decide por
+  línea si mostrar borrador (la edito yo, con lock) u oficial. Migración **`migrations/borrador.sql`**.
+  Limitaciones (follow-ups): el "resto ve el plasmado al instante" por Realtime de `produccion_programada` quedó
+  pendiente — hoy lo ven al recargar / con Actualizar; y hay una ventana mínima de carrera si soltás una WO en el
+  primer ~segundo de entrar a una línea (antes de terminar el fork) → si pasa, "Descartar" lo arregla.
+- **F5** (botón Actualizar): `components/RefreshButton.tsx` arriba a la derecha; inserta en `refresh_log`
+  (status 'pendiente') que el watcher (sync) levanta, y al completar recarga (`onComplete=cargar`). **Sin migración**
+  (refresh_log ya existe en la base compartida).
+- **F4** (capacidad): tabla `capacidad_linea` (linea, semana=lunes ISO, turno, paradas_op/ext). Panel arriba con
+  selector de **turno** (L1/L0: 3T lun→sáb13 / 4T lun→dom; L2/TM: mañana+sáb / tarde), inputs de **% paradas**
+  op/ext y barra de **% de uso de la semana** (minutos programados / capacidad efectiva = horas_turno × (1−paradas)).
+  Editable solo por el programador con el lock. Migración **`migrations/capacidad_linea.sql`**.
 - **F3** (setups reales): la banda entre órdenes ahora es el **cambio real = el MÁXIMO de los componentes**
   (formato / etiqueta / velcorin / azúcar / caja / cambio de vino) con la **etiqueta del que manda**
   (ej. "⚙ 45m · formato"). Portado del Optimizador de ProgramacionCQ → **`lib/setups.ts`**: `buildSetupMaps`
@@ -170,12 +187,13 @@ Buena parte de la logica pesada (setups reales, enriquecimiento botella/formato/
 - **F1b** ✅ — lock por linea (`linea_edicion`, heartbeat 3min / TTL 10min) + Realtime + poll 30s + indicadores
   ("Editás vos" / "La edita Fulano" / 🔒 en la pestaña). `puedeEditar = isAdmin && !lockDeOtro(linea)`.
   **Pendiente del usuario**: activar Realtime de la tabla en Supabase → Database → Replication.
-- **F2** — borrador/oficial + boton "Plasmar Programa".
+- **F2** ✅ — borrador/oficial + botón "Plasmar Programa" (capability-flag por columna `estado`; `migrations/borrador.sql`).
+  Falta (follow-up): Realtime de `produccion_programada` para que el resto vea el plasmado al instante.
 - **F3** ✅ — setups reales (máximo de componentes + etiqueta) en `lib/setups.ts`, recomputados en la cadena.
   Falta: restricciones de formato por línea (el centinela 9999/`>=900` hoy se ignora).
-- **F4** — visual: gap de setup entre ordenes, % de uso por linea (paradas + turnos), vista semanal +
-  distribucion de vinos.
-- **F5** — boton Actualizar (sync) + ajustes al script.
+- **F4** ✅ (capacidad) — turnos + % paradas + **% de uso por línea/semana** (`migrations/capacidad_linea.sql`).
+  Falta (follow-up): vista semanal agregada + distribución de vinos por semana.
+- **F5** ✅ — botón Actualizar (dispara el sync vía `refresh_log`, `components/RefreshButton.tsx`).
 - Deuda: fix `npm run lint`; bug del tipo directo/vestido (`insumoActivo` vacio); restricciones de formato por linea.
 
 ## Regla de actualizacion
