@@ -65,6 +65,9 @@ Next.js 16.2.6 (Turbopack) · React 19 · Tailwind 4 · `@supabase/supabase-js`.
 `linea_edicion.sql` (F1b) + Realtime de `linea_edicion` activado.
 
 **Falta correr (SQL Editor):**
+- **`migrations/produccion_programada_wo_estado.sql`** — **IMPORTANTE para F2**. Cambia la unique de `wo`
+  a `(wo, estado)`. Sin esto, programar/forkear tira `duplicate key ... produccion_programada_wo_unique`
+  porque la misma WO no puede estar como oficial + borrador.
 - `migrations/realtime_programa.sql` — Realtime del programa oficial, para que el resto vea el "Plasmar"
   al instante. Es `alter publication supabase_realtime add table produccion_programada` (idempotente).
   Sin esto, F2 funciona igual pero el resto ve el plasmado al recargar / con Actualizar.
