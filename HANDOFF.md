@@ -61,6 +61,14 @@ Next.js 16.2.6 (Turbopack) · React 19 · Tailwind 4 · `@supabase/supabase-js`.
 
 ## Estado actual — lo hecho (mas nuevo arriba)
 
+- **F1b** (lock por línea): solo **1 programador edita una línea a la vez** (tabla `linea_edicion`,
+  esquema en `migrations/linea_edicion.sql`). Al entrar a una línea el admin **toma el lock**; **heartbeat
+  cada 3 min**, vence a los **10 min** sin refresco; se **libera** al salir/cerrar (best-effort + TTL).
+  `puedeEditar = isAdmin && !lockDeOtro(linea)`. Indicadores: badge **"Editás vos"** (admin libre) /
+  banner **"La está editando Fulano"** + **🔒** en la pestaña de la línea tomada por otro. Sync por
+  **Realtime** (`postgres_changes` de `linea_edicion`) **+ poll de respaldo cada 30s** (anda aunque
+  Realtime no esté activo). **Pendiente del usuario**: activar **Realtime de `linea_edicion`** en Supabase
+  → Database → Replication (sin eso el indicador se actualiza por el poll de 30s, no instantáneo).
 - **Lote 2** (visual + mover bloques):
   - **Bloques rediseñados**: N° de orden grande, **SKU** (`cod_item_largo`) y **duración** (`fmtDur`,
     en vez del horario) siempre visibles; **borde marcado**; **banda de setup** arriba de cada orden
@@ -147,8 +155,9 @@ Buena parte de la logica pesada (setups reales, enriquecimiento botella/formato/
 - **Lote 1a** ✅ — UX base (pantalla completa, filtro estado, click=info, quitar ✕+doble-click).
 - **Lote 1b** ✅ — cajas editable + merge.
 - **F1a** ✅ — selector de linea al entrar (pantalla completa) + roles Admin/Visita (port de permisos) + read-only por rol.
-- **F1b** (sigue) — lock por linea (tabla `linea_edicion`, heartbeat 10min) + Realtime del indicador "quien edita".
-  `puedeEditar` hoy = `isAdmin`; pasara a `isAdmin && (lock libre o mio)`. Activar Realtime de `linea_edicion` en Supabase.
+- **F1b** ✅ — lock por linea (`linea_edicion`, heartbeat 3min / TTL 10min) + Realtime + poll 30s + indicadores
+  ("Editás vos" / "La edita Fulano" / 🔒 en la pestaña). `puedeEditar = isAdmin && !lockDeOtro(linea)`.
+  **Pendiente del usuario**: activar Realtime de la tabla en Supabase → Database → Replication.
 - **F2** — borrador/oficial + boton "Plasmar Programa".
 - **F3** — enriquecimiento + setups reales (portar del optimizador).
 - **F4** — visual: gap de setup entre ordenes, % de uso por linea (paradas + turnos), vista semanal +
