@@ -25,6 +25,22 @@ const LOCK_TTL_MS  = 10 * 60 * 1000
 const HEARTBEAT_MS = 3 * 60 * 1000
 interface LockRow { linea: string; usuario_email: string; usuario_nombre: string | null; last_seen: string }
 
+// Capacidad / turnos por línea y semana (F4).
+interface CapRow { linea: string; semana: string; turno: string; paradas_op: number; paradas_ext: number }
+const esL1L0 = (l: string) => l === 'L1' || l === 'L0'
+const defaultTurno = (l: string) => (esL1L0(l) ? '3T' : 'mañana')
+function turnoOpciones(l: string): { val: string; label: string }[] {
+  return esL1L0(l)
+    ? [{ val: '3T', label: '3 turnos · L→Sáb 13h' }, { val: '4T', label: '4 turnos · L→Dom' }]
+    : [{ val: 'mañana', label: 'Mañana · +Sáb' }, { val: 'tarde', label: 'Tarde' }]
+}
+// Horas disponibles por semana según el turno elegido.
+function horasSemana(l: string, turno: string): number {
+  if (esL1L0(l)) return turno === '4T' ? 168 : 127   // 3T = lun 06:00 → sáb 13:00
+  return turno === 'tarde' ? 40 : 47                  // mañana = Lun-Vie 06-14 + Sáb 06-13
+}
+const fmtH = (min: number) => `${(min / 60).toLocaleString('es-AR', { maximumFractionDigits: 1 })} h`
+
 // ── Tipos ────────────────────────────────────────────────────────────────────
 interface WoBacklog {
   orden: string
@@ -139,6 +155,7 @@ export default function ProgramadorPage() {
   const [dragBlock, setDragBlock] = useState<number | null>(null)
   const [locks, setLocks]     = useState<Record<string, LockRow>>({})
   const heldRef = useRef<Set<string>>(new Set())
+  const [capacidad, setCapacidad] = useState<Record<string, CapRow>>({})
 
   const dias = useMemo(() => semanaDesde(monday), [monday])
 
@@ -263,10 +280,17 @@ export default function ProgramadorPage() {
       finalProg = finalProg.map(p => byId.get(p.id) ?? p)
     }
 
+    // Capacidad / turnos de la semana (config por línea)
+    const { data: capData } = await supabase
+      .from('capacidad_linea').select('*').eq('semana', toISODate(monday))
+    const capMap: Record<string, CapRow> = {}
+    ;(capData ?? []).forEach(r => { const rr = r as CapRow; capMap[`${rr.linea}|${rr.semana}`] = rr })
+
     setProgramadas(finalProg)
     setBacklog(woRows.filter(w => !yaProg.has(w.orden)))
     setMaps(m)
     setSetupMaps(setupM)
+    setCapacidad(capMap)
     setLoading(false)
   }, [monday])
 
@@ -454,6 +478,21 @@ export default function ProgramadorPage() {
     }
   }
 
+  // ── Guardar capacidad / turno de la línea-semana (F4) ────────────────────────
+  async function guardarCapacidad(patch: Partial<Pick<CapRow, 'turno' | 'paradas_op' | 'paradas_ext'>>) {
+    if (!linea || !puedeEditar) return
+    const semana = toISODate(monday)
+    const cur = capacidad[`${linea}|${semana}`]
+    const row: CapRow = {
+      linea, semana,
+      turno:       patch.turno       ?? cur?.turno       ?? defaultTurno(linea),
+      paradas_op:  patch.paradas_op  ?? cur?.paradas_op  ?? 0,
+      paradas_ext: patch.paradas_ext ?? cur?.paradas_ext ?? 0,
+    }
+    setCapacidad(prev => ({ ...prev, [`${linea}|${semana}`]: row }))
+    await supabase.from('capacidad_linea').upsert(row, { onConflict: 'linea,semana' })
+  }
+
   // ── Backlog filtrado ────────────────────────────────────────────────────────
   const q = search.trim().toLowerCase()
   const backlogVisible = useMemo(() => backlog.filter(w =>
@@ -478,6 +517,21 @@ export default function ProgramadorPage() {
   }
   const editaOtro  = linea ? lockDeOtro(linea) : null
   const puedeEditar = isAdmin && !!linea && !editaOtro
+
+  // Capacidad de la línea/semana actual (F4)
+  const semKey = toISODate(monday)
+  const capActual   = linea ? capacidad[`${linea}|${semKey}`] : undefined
+  const turnoActual = linea ? (capActual?.turno ?? defaultTurno(linea)) : ''
+  const paradasOp   = capActual?.paradas_op ?? 0
+  const paradasExt  = capActual?.paradas_ext ?? 0
+  const horasDisp   = linea ? horasSemana(linea, turnoActual) : 0
+  const capMin = horasDisp * 60 * Math.max(0, 1 - (paradasOp + paradasExt) / 100)
+  const minProgSemana = programadas
+    .filter(p => p.linea === linea && dias.some(d => d.iso === p.fecha))
+    .reduce((s, p) => s + p.setup_min + p.duracion_min, 0)
+  const pctUso = capMin > 0 ? (minProgSemana / capMin) * 100 : 0
+  const usoColor = pctUso >= 100 ? 'text-red-700' : pctUso >= 85 ? 'text-amber-700' : 'text-emerald-700'
+  const barColor = pctUso >= 100 ? 'bg-red-600' : pctUso >= 85 ? 'bg-amber-500' : 'bg-emerald-500'
 
   // Pantalla de selección de línea al entrar
   if (linea === null) {
@@ -542,6 +596,42 @@ export default function ProgramadorPage() {
           La línea <b>{linea}</b> la está editando <b>{editaOtro.usuario_nombre || editaOtro.usuario_email}</b>. Estás en modo solo lectura.
         </div>
       )}
+
+      {/* Panel de capacidad / turnos (F4) */}
+      <div className="mb-3 rounded-xl border border-stone-200 bg-white px-3 py-2.5">
+        <div className="flex items-center justify-between flex-wrap gap-x-5 gap-y-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-semibold text-stone-500">Turno</span>
+            {turnoOpciones(linea).map(o => (
+              <button key={o.val} disabled={!puedeEditar}
+                onClick={() => guardarCapacidad({ turno: o.val })}
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
+                  turnoActual === o.val ? 'bg-red-900 text-onbrand' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                } ${!puedeEditar ? 'opacity-60 cursor-default' : ''}`}>
+                {o.label}
+              </button>
+            ))}
+            <span className="text-[11px] text-stone-400 tabular-nums">{horasDisp} h/sem</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-stone-500">% paradas op.</label>
+            <NumInput value={paradasOp} disabled={!puedeEditar} onSave={n => guardarCapacidad({ paradas_op: n })} />
+            <label className="text-xs text-stone-500">% paradas ext.</label>
+            <NumInput value={paradasExt} disabled={!puedeEditar} onSave={n => guardarCapacidad({ paradas_ext: n })} />
+          </div>
+        </div>
+        <div className="mt-2">
+          <div className="flex items-center justify-between text-xs mb-0.5">
+            <span className="text-stone-500">Uso de la semana</span>
+            <span className={`font-semibold tabular-nums ${usoColor}`}>
+              {pctUso.toFixed(0)}% · {fmtH(minProgSemana)} / {fmtH(capMin)}
+            </span>
+          </div>
+          <div className="h-2.5 rounded-full bg-stone-100 overflow-hidden">
+            <div className={`h-full ${barColor} transition-all`} style={{ width: `${Math.min(100, pctUso)}%` }} />
+          </div>
+        </div>
+      </div>
 
       <div className="grid grid-cols-[280px_1fr] gap-4">
         {/* ── Backlog ── */}
@@ -834,6 +924,21 @@ function Row({ k, v }: { k: string; v: string }) {
       <dt className="text-stone-400">{k}</dt>
       <dd className="text-stone-700 font-medium text-right">{v}</dd>
     </div>
+  )
+}
+
+// Input numérico (%) que guarda en onBlur/Enter; se resincroniza si cambia el valor externo.
+function NumInput({ value, disabled, onSave }: { value: number; disabled: boolean; onSave: (n: number) => void }) {
+  const [v, setV] = useState(String(value))
+  useEffect(() => { setV(String(value)) }, [value])
+  return (
+    <input
+      type="number" min={0} max={100} disabled={disabled} value={v}
+      onChange={e => setV(e.target.value)}
+      onBlur={() => onSave(Math.max(0, Math.min(100, Number(v) || 0)))}
+      onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+      className="w-14 border border-stone-200 rounded-md px-1.5 py-1 text-xs tabular-nums focus:outline-none focus:border-red-400 disabled:opacity-60"
+    />
   )
 }
 
