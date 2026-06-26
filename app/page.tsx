@@ -42,6 +42,12 @@ function horasSemana(l: string, turno: string): number {
 }
 const fmtH = (min: number) => `${(min / 60).toLocaleString('es-AR', { maximumFractionDigits: 1 })} h`
 
+// ¿Tengo yo el lock vigente de la línea L? (helper de módulo para usar sin orden de declaración)
+function lockMioDe(locks: Record<string, LockRow>, l: string, email: string | null | undefined): boolean {
+  const lk = locks[l]
+  return !!lk && Date.now() - new Date(lk.last_seen).getTime() < LOCK_TTL_MS && lk.usuario_email === (email ?? '')
+}
+
 // ── Tipos ────────────────────────────────────────────────────────────────────
 interface WoBacklog {
   orden: string
@@ -69,6 +75,7 @@ interface Programada {
   sku?: string | null             // cod_item_largo (en memoria, NO persiste)
   codEq?: string | null           // codigo de vino derivado (en memoria, para agrupar)
   setupLabel?: string             // componente que manda en el setup (en memoria)
+  estado?: string                 // 'oficial' | 'borrador' (F2)
 }
 
 // Cajas efectivas: el ajuste manual si existe, si no la de sistema.
@@ -157,12 +164,17 @@ export default function ProgramadorPage() {
   const [locks, setLocks]     = useState<Record<string, LockRow>>({})
   const heldRef = useRef<Set<string>>(new Set())
   const [capacidad, setCapacidad] = useState<Record<string, CapRow>>({})
+  const [draftEnabled, setDraftEnabled] = useState(false)   // F2: existe la columna `estado`
+  const forkedRef = useRef<Set<string>>(new Set())
 
   const dias = useMemo(() => semanaDesde(monday), [monday])
 
   // ── Carga de datos ─────────────────────────────────────────────────────────
   const cargar = useCallback(async () => {
     setLoading(true)
+    // F2: ¿existe la columna `estado`? Si no, la app se comporta como antes (todo oficial).
+    const { error: estadoErr } = await supabase.from('produccion_programada').select('estado').limit(1)
+    setDraftEnabled(!estadoErr)
     const desde = toISODate(monday)
     const hasta = toISODate(addDays(monday, 14))   // semana actual + siguiente
 
@@ -206,8 +218,7 @@ export default function ProgramadorPage() {
         .lt('fe_solicitada', hasta),
     ])
 
-    const programadasData = (prog ?? []) as Programada[]
-    const yaProg = new Set(programadasData.map(p => p.wo))
+    const programadasData = ((prog ?? []) as Programada[]).map(p => ({ ...p, estado: p.estado ?? 'oficial' }))
     const m = buildDuracionMaps(
       (velRes.data ?? []) as VelocidadRow[],
       (insRes.data ?? []) as InsumoBotellaRow[],
@@ -219,7 +230,7 @@ export default function ProgramadorPage() {
 
     // Merge: si el SISTEMA (ope_ordenes.cajas_jde) cambió la cantidad de una WO ya
     // programada, se descarta el ajuste manual y se adopta la nueva de sistema.
-    let merged = programadasData
+    let merged: Programada[] = programadasData
     const progWos = [...new Set(programadasData.map(p => p.wo))]
     if (progWos.length) {
       const [sysRes, prodVinoRes] = await Promise.all([
@@ -288,7 +299,7 @@ export default function ProgramadorPage() {
     ;(capData ?? []).forEach(r => { const rr = r as CapRow; capMap[`${rr.linea}|${rr.semana}`] = rr })
 
     setProgramadas(finalProg)
-    setBacklog(woRows.filter(w => !yaProg.has(w.orden)))
+    setBacklog(woRows)
     setMaps(m)
     setSetupMaps(setupM)
     setCapacidad(capMap)
@@ -369,11 +380,20 @@ export default function ProgramadorPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [perfil?.email])
 
+  // F2: al tener el lock de una línea, forkear su borrador una sola vez
+  useEffect(() => {
+    if (!draftEnabled || !linea || !isAdmin) return
+    if (!lockMioDe(locks, linea, perfil?.email) || forkedRef.current.has(linea)) return
+    forkedRef.current.add(linea)
+    ensureDraft(linea)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftEnabled, linea, isAdmin, locks, perfil?.email])
+
   // ── Programar una WO (drop sobre un día) ─────────────────────────────────────
   async function programar(wo: WoBacklog, fechaIso: string) {
     if (!linea) return
-    // Bloques existentes de esta línea+día, para encadenar al final
-    const delDia = programadas
+    // Bloques existentes de esta línea+día, para encadenar al final (vista efectiva)
+    const delDia = programadasVisible
       .filter(p => p.linea === linea && p.fecha === fechaIso)
       .sort((a, b) => a.orden_en_dia - b.orden_en_dia)
 
@@ -388,7 +408,7 @@ export default function ProgramadorPage() {
 
     const fin = new Date(inicio.getTime() + totalMin * 60000)
 
-    const fila = {
+    const fila: Record<string, unknown> = {
       wo: wo.orden,
       linea,
       fecha: fechaIso,
@@ -403,6 +423,8 @@ export default function ProgramadorPage() {
       usuario_email: perfil?.email ?? null,
       usuario_nombre: perfil?.nombre ?? null,
     }
+    // F2: la WO se agrega al borrador si tengo el lock de la línea
+    if (draftEnabled) fila.estado = lockMioDe(locks, linea, perfil?.email) ? 'borrador' : 'oficial'
 
     const { data, error } = await supabase
       .from('produccion_programada')
@@ -427,10 +449,12 @@ export default function ProgramadorPage() {
   async function ajustarCajas(p: Programada, nuevo: number | null) {
     const sys = p.cajas ?? 0
     const ajustado = (nuevo == null || nuevo <= 0 || nuevo === sys) ? null : Math.round(nuevo)
-    const base = programadas.map(x => x.id === p.id ? { ...x, cajas_ajustado: ajustado } : x)
-    const recalced = recalcCadena(base.filter(x => x.linea === p.linea && x.fecha === p.fecha), p.linea, p.fecha, maps, setupMaps)
+    const visibles = programadasVisible
+      .filter(x => x.linea === p.linea && x.fecha === p.fecha)
+      .map(x => x.id === p.id ? { ...x, cajas_ajustado: ajustado } : x)
+    const recalced = recalcCadena(visibles, p.linea, p.fecha, maps, setupMaps)
     const byId = new Map(recalced.map(r => [r.id, r]))
-    setProgramadas(base.map(x => byId.get(x.id) ?? x))
+    setProgramadas(prev => prev.map(x => byId.get(x.id) ?? x))
     await supabase.from('produccion_programada').update({ cajas_ajustado: ajustado }).eq('id', p.id)
     for (const rc of recalced) {
       await supabase.from('produccion_programada').update({
@@ -446,7 +470,7 @@ export default function ProgramadorPage() {
     if (!moved) return
     const oldFecha = moved.fecha
 
-    let arr = programadas.map(p => p.id === blockId ? { ...p, fecha: targetFecha } : { ...p })
+    let arr = programadasVisible.map(p => p.id === blockId ? { ...p, fecha: targetFecha } : { ...p })
     const movedRow = arr.find(p => p.id === blockId)!
 
     // Día destino: insertar antes de beforeId (o al final)
@@ -469,7 +493,8 @@ export default function ProgramadorPage() {
       const byId = new Map(recalced.map(r => [r.id, r]))
       arr = arr.map(p => byId.get(p.id) ?? p)
     }
-    setProgramadas(arr)
+    const byIdMov = new Map(arr.map(r => [r.id, r]))
+    setProgramadas(prev => prev.map(x => byIdMov.get(x.id) ?? x))
 
     for (const p of arr.filter(p => p.linea === linea && dias.has(p.fecha))) {
       await supabase.from('produccion_programada').update({
@@ -477,6 +502,52 @@ export default function ProgramadorPage() {
         hora_inicio: p.hora_inicio, hora_fin: p.hora_fin, duracion_min: p.duracion_min,
       }).eq('id', p.id)
     }
+  }
+
+  // ── Borrador / Plasmar (F2) ──────────────────────────────────────────────────
+  // Forkea el oficial de la línea a un borrador propio (si todavía no tengo uno).
+  async function ensureDraft(L: string) {
+    const { data: existing } = await supabase.from('produccion_programada')
+      .select('id,usuario_email').eq('linea', L).eq('estado', 'borrador')
+    const rows = (existing ?? []) as { id: number; usuario_email: string | null }[]
+    if (rows.some(r => r.usuario_email === (perfil?.email ?? ''))) return   // ya tengo borrador propio
+    if (rows.length) await supabase.from('produccion_programada').delete().eq('linea', L).eq('estado', 'borrador')
+    const { data: oficiales } = await supabase.from('produccion_programada')
+      .select('*').eq('linea', L).eq('estado', 'oficial')
+    const ofs = (oficiales ?? []) as Programada[]
+    if (ofs.length) {
+      await supabase.from('produccion_programada').insert(ofs.map(p => ({
+        wo: p.wo, linea: p.linea, fecha: p.fecha, hora_inicio: p.hora_inicio, hora_fin: p.hora_fin,
+        duracion_min: p.duracion_min, setup_min: p.setup_min, orden_en_dia: p.orden_en_dia,
+        descripcion: p.descripcion, cajas: p.cajas, cajas_ajustado: p.cajas_ajustado,
+        fraccionado: p.fraccionado, estado: 'borrador',
+        usuario_email: perfil?.email ?? null, usuario_nombre: perfil?.nombre ?? null,
+      })))
+    }
+    await cargar()
+  }
+
+  // Publica el borrador de la línea como oficial (lo ve todo el mundo) y deja un
+  // borrador fresco para seguir editando (no queda la línea sin borrador).
+  async function plasmar() {
+    if (!linea || !puedeEditar || !draftEnabled) return
+    const L = linea
+    const { data: viejos } = await supabase.from('produccion_programada')
+      .select('id').eq('linea', L).eq('estado', 'oficial')
+    // Promover borrador→oficial primero (sin ventana de pérdida), luego borrar el oficial viejo.
+    await supabase.from('produccion_programada').update({ estado: 'oficial' })
+      .eq('linea', L).eq('estado', 'borrador')
+    const ids = (viejos ?? []).map(r => (r as { id: number }).id)
+    if (ids.length) await supabase.from('produccion_programada').delete().in('id', ids)
+    await ensureDraft(L)   // re-forkea un borrador fresco desde el nuevo oficial (incluye cargar)
+  }
+
+  // Descarta el borrador de la línea: vuelve a un borrador limpio = copia del oficial.
+  async function descartarBorrador() {
+    if (!linea || !puedeEditar || !draftEnabled) return
+    const L = linea
+    await supabase.from('produccion_programada').delete().eq('linea', L).eq('estado', 'borrador')
+    await ensureDraft(L)
   }
 
   // ── Guardar capacidad / turno de la línea-semana (F4) ────────────────────────
@@ -494,15 +565,26 @@ export default function ProgramadorPage() {
     await supabase.from('capacidad_linea').upsert(row, { onConflict: 'linea,semana' })
   }
 
-  // ── Backlog filtrado ────────────────────────────────────────────────────────
+  // ── Vista efectiva (F2): borrador para la línea que edito, oficial para el resto ──
   const q = search.trim().toLowerCase()
+  const programadasVisible = useMemo(() => {
+    if (!draftEnabled) return programadas
+    const draftLines = new Set(programadas.filter(p => p.estado === 'borrador').map(p => p.linea))
+    return programadas.filter(p => {
+      const verBorrador = draftLines.has(p.linea) && lockMioDe(locks, p.linea, perfil?.email)
+      return verBorrador ? p.estado === 'borrador' : p.estado === 'oficial'
+    })
+  }, [programadas, locks, draftEnabled, perfil?.email])
+
+  const progWosVisible = useMemo(() => new Set(programadasVisible.map(p => p.wo)), [programadasVisible])
   const backlogVisible = useMemo(() => backlog.filter(w =>
-    !q || w.orden.toLowerCase().includes(q) || (w.descripcion ?? '').toLowerCase().includes(q)
-  ), [backlog, q])
+    !progWosVisible.has(w.orden) &&
+    (!q || w.orden.toLowerCase().includes(q) || (w.descripcion ?? '').toLowerCase().includes(q))
+  ), [backlog, q, progWosVisible])
 
   const progLinea = useMemo(
-    () => programadas.filter(p => p.linea === linea),
-    [programadas, linea]
+    () => programadasVisible.filter(p => p.linea === linea),
+    [programadasVisible, linea]
   )
 
   const infoBlock = info ? (programadas.find(p => p.id === info.id) ?? null) : null
@@ -518,6 +600,8 @@ export default function ProgramadorPage() {
   }
   const editaOtro  = linea ? lockDeOtro(linea) : null
   const puedeEditar = isAdmin && !!linea && !editaOtro
+  const hayBorrador = draftEnabled && !!linea && lockMioDe(locks, linea, perfil?.email) &&
+    programadas.some(p => p.linea === linea && p.estado === 'borrador')
 
   // Capacidad de la línea/semana actual (F4)
   const semKey = toISODate(monday)
@@ -527,7 +611,7 @@ export default function ProgramadorPage() {
   const paradasExt  = capActual?.paradas_ext ?? 0
   const horasDisp   = linea ? horasSemana(linea, turnoActual) : 0
   const capMin = horasDisp * 60 * Math.max(0, 1 - (paradasOp + paradasExt) / 100)
-  const minProgSemana = programadas
+  const minProgSemana = programadasVisible
     .filter(p => p.linea === linea && dias.some(d => d.iso === p.fecha))
     .reduce((s, p) => s + p.setup_min + p.duracion_min, 0)
   const pctUso = capMin > 0 ? (minProgSemana / capMin) * 100 : 0
@@ -553,7 +637,7 @@ export default function ProgramadorPage() {
             <span className="text-[11px] font-medium px-2 py-1 rounded-full bg-emerald-100 text-emerald-700">Editás vos</span>
           )}
           {LINEAS.map(l => {
-            const n = programadas.filter(p => p.linea === l).length
+            const n = programadasVisible.filter(p => p.linea === l).length
             return (
               <button
                 key={l}
@@ -596,6 +680,19 @@ export default function ProgramadorPage() {
         <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
           <span className="text-base">🔒</span>
           La línea <b>{linea}</b> la está editando <b>{editaOtro.usuario_nombre || editaOtro.usuario_email}</b>. Estás en modo solo lectura.
+        </div>
+      )}
+
+      {/* Borrador sin publicar (F2) */}
+      {hayBorrador && (
+        <div className="mb-3 flex items-center justify-between flex-wrap gap-2 rounded-lg border border-stone-300 bg-stone-50 px-3 py-2 text-sm">
+          <span className="text-stone-700">Estás editando un <b>borrador</b> de {linea}. El resto ve el programa oficial hasta que lo plasmes.</span>
+          <div className="flex items-center gap-2">
+            <button onClick={descartarBorrador}
+              className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white text-stone-600 text-xs hover:bg-stone-100">Descartar borrador</button>
+            <button onClick={plasmar}
+              className="px-3 py-1 rounded-lg bg-red-900 text-onbrand text-xs font-semibold hover:bg-red-800 shadow-sm">Plasmar Programa</button>
+          </div>
         </div>
       )}
 
