@@ -61,6 +61,18 @@ Next.js 16.2.6 (Turbopack) · React 19 · Tailwind 4 · `@supabase/supabase-js`.
 
 ## Estado actual — lo hecho (mas nuevo arriba)
 
+- **F3** (setups reales): la banda entre órdenes ahora es el **cambio real = el MÁXIMO de los componentes**
+  (formato / etiqueta / velcorin / azúcar / caja / cambio de vino) con la **etiqueta del que manda**
+  (ej. "⚙ 45m · formato"). Portado del Optimizador de ProgramacionCQ → **`lib/setups.ts`**: `buildSetupMaps`
+  carga las tablas `setup_*` + `producto_atributos` / `insumo_formato` / `vino_equivalencias` y **deriva los
+  atributos por orden** (nFormato por IFR→insumo_formato, color/velcorin/azúcar/caja, wineKey vía
+  vino_equivalencias); `setupEntre(prevWo, wo, linea, maps)` aplica la regla del máximo y devuelve `{min,label}`.
+  El setup se **recomputa en la cadena** según la orden previa (`recalcCadena` ahora recibe `SetupMaps`), así
+  que **al reordenar/mover el setup se recalcula bien** (antes quedaba el del momento de programar). En la carga
+  se recomputan todos los días **en memoria** (corrige el setup fijo viejo de 30m); cada edición persiste su día
+  (incluido `setup_min`). La etiqueta también aparece en el popover. **Sin migración** (las `setup_*` ya existen).
+  Centinela `>=900` de `setup_formato` (formato infactible) se ignora para no romper el layout — las
+  **restricciones de formato por línea siguen pendientes** (Lautaro pasará el detalle).
 - **F1b** (lock por línea): solo **1 programador edita una línea a la vez** (tabla `linea_edicion`,
   esquema en `migrations/linea_edicion.sql`). Al entrar a una línea el admin **toma el lock**; **heartbeat
   cada 3 min**, vence a los **10 min** sin refresco; se **libera** al salir/cerrar (best-effort + TTL).
@@ -159,7 +171,8 @@ Buena parte de la logica pesada (setups reales, enriquecimiento botella/formato/
   ("Editás vos" / "La edita Fulano" / 🔒 en la pestaña). `puedeEditar = isAdmin && !lockDeOtro(linea)`.
   **Pendiente del usuario**: activar Realtime de la tabla en Supabase → Database → Replication.
 - **F2** — borrador/oficial + boton "Plasmar Programa".
-- **F3** — enriquecimiento + setups reales (portar del optimizador).
+- **F3** ✅ — setups reales (máximo de componentes + etiqueta) en `lib/setups.ts`, recomputados en la cadena.
+  Falta: restricciones de formato por línea (el centinela 9999/`>=900` hoy se ignora).
 - **F4** — visual: gap de setup entre ordenes, % de uso por linea (paradas + turnos), vista semanal +
   distribucion de vinos.
 - **F5** — boton Actualizar (sync) + ajustes al script.
