@@ -17,8 +17,8 @@ type Linea = (typeof LINEAS)[number]
 // Backlog: ordenes con estado >= 40 (40/41 listas · 45 en proceso · 60 c/control pendiente · 98 OK),
 // excepto 99 (canceladas). Las < 40 no se muestran.
 
-// Alto del timeline de un día (24h). 20px por hora.
-const DIA_H = 480
+// Alto del timeline de un día (24h).
+const DIA_H = 560
 const HORA_INICIO_DEFAULT = 6   // si el día está vacío, la primera WO arranca 06:00
 
 // Lock por línea (F1b): heartbeat cada 3 min; el lock vence a los 10 min sin refresco.
@@ -90,10 +90,13 @@ function recalcCadena(delDia: Programada[], lineaKey: string, fechaIso: string, 
   let prevFin: Date | null = null
   let prevWo: string | null = null
   return sorted.map((p, i) => {
-    const inicio = prevFin ?? new Date(`${fechaIso}T${String(HORA_INICIO_DEFAULT).padStart(2, '0')}:00:00`)
     const { min: setupMin, label } = setupEntre(prevWo, p.wo, lineaKey, sm)
+    // El setup ocurre en el HUECO antes de la orden: producción arranca tras el setup.
+    const inicio = prevFin
+      ? new Date(prevFin.getTime() + setupMin * 60000)
+      : new Date(`${fechaIso}T${String(HORA_INICIO_DEFAULT).padStart(2, '0')}:00:00`)
     const dur = minutosProduccion(cajasEf(p), lineaKey, p.wo, m)
-    const fin = new Date(inicio.getTime() + (setupMin + dur) * 60000)
+    const fin = new Date(inicio.getTime() + dur * 60000)
     prevFin = fin; prevWo = p.wo
     return { ...p, hora_inicio: inicio.toISOString(), hora_fin: fin.toISOString(), duracion_min: dur, setup_min: setupMin, setupLabel: label, orden_en_dia: i + 1 }
   })
@@ -113,14 +116,14 @@ function codEqDeInsumo(insumo: string | null | undefined): string | null {
   return i.startsWith('ISVTP') ? i.replace(/^ISVTP/, '').replace(/-.*$/, '').trim() : i
 }
 
-// Posicion (px) de un bloque en el timeline del dia.
+// Posicion (px) de un bloque en el timeline del dia. La altura es SOLO la producción;
+// el setup vive en el hueco (entre hora_fin del anterior y hora_inicio de este).
 function posBloque(p: Programada): { top: number; h: number } {
   const ini = new Date(p.hora_inicio)
   const minM = ini.getHours() * 60 + ini.getMinutes()
-  const total = p.setup_min + p.duracion_min
   const top = (minM / 1440) * DIA_H
-  const rawH = (total / 1440) * DIA_H
-  const h = Math.max(18, Math.min(rawH, DIA_H - top))
+  const rawH = (p.duracion_min / 1440) * DIA_H
+  const h = Math.max(20, Math.min(rawH, DIA_H - top))
   return { top, h }
 }
 
@@ -859,6 +862,16 @@ export default function ProgramadorPage() {
                         style={{ top: g.top - 2, height: g.height + 4, border: `2px solid ${colorDeVino(g.key)}` }} />
                     ))}
 
+                    {/* Setup en el HUECO entre órdenes (chip) */}
+                    {bloques.map((p, i) => {
+                      if (i === 0 || p.setup_min <= 0) return null
+                      const prev = bloques[i - 1]
+                      const pf = new Date(prev.hora_fin)
+                      const gapTop = ((pf.getHours() * 60 + pf.getMinutes()) / 1440) * DIA_H
+                      const gapH = Math.max(0, (p.setup_min / 1440) * DIA_H)
+                      return <SetupGap key={`s${p.id}`} top={gapTop} h={gapH} min={p.setup_min} label={p.setupLabel} />
+                    })}
+
                     {bloques.map(p => (
                       <Bloque key={p.id} p={p} puedeEditar={puedeEditar}
                         onInfo={e => setInfo({ id: p.id, x: e.clientX, y: e.clientY })}
@@ -902,11 +915,6 @@ function Bloque({ p, puedeEditar, onInfo, onQuitar, onMoveStart, onMoveEnd, onMo
   onMoveDropHere: () => void
 }) {
   const { top, h } = posBloque(p)
-  const totalMin = p.setup_min + p.duracion_min
-  const bandH = p.setup_min > 0 && totalMin > 0
-    ? Math.max(9, Math.min(h * (p.setup_min / totalMin), h * 0.45))
-    : 0
-
   const adj   = p.cajas_ajustado != null
   const ef    = cajasEf(p)
   const sys   = p.cajas ?? 0
@@ -926,24 +934,16 @@ function Bloque({ p, puedeEditar, onInfo, onQuitar, onMoveStart, onMoveEnd, onMo
         onClick={onInfo}
         className={`w-full h-full rounded-md bg-red-800 hover:bg-red-700 text-white overflow-hidden shadow border-2 border-red-950/70 flex flex-col ${puedeEditar ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}`}
       >
-        {/* Banda de setup = cambio entre órdenes (máximo de los componentes, con la etiqueta del que manda) */}
-        {bandH > 0 && (
-          <div
-            className="shrink-0 flex items-center justify-center gap-0.5 px-0.5 text-[8px] font-semibold text-white/90 text-center leading-none"
-            style={{ height: bandH, backgroundImage: 'repeating-linear-gradient(45deg,#7f1d1d,#7f1d1d 4px,#9f1239 4px,#9f1239 8px)' }}
-            title={`Setup ${p.setup_min} min${p.setupLabel ? ` · ${p.setupLabel}` : ''}`}
-          >
-            {bandH > 11 ? `⚙ ${p.setup_min}m${p.setupLabel ? ` · ${p.setupLabel.replace('cambio de ', '')}` : ''}` : ''}
-          </div>
-        )}
-        {/* Contenido: N° de orden grande + SKU + duración */}
+        {/* Contenido: N° de orden grande + (SKU) + duración — adaptativo al alto */}
         <div className="flex-1 min-h-0 px-1.5 py-0.5 overflow-hidden leading-tight">
           <div className="text-[13px] font-bold font-mono truncate">{p.wo}</div>
-          {p.sku && <div className="text-[9px] font-mono text-white/75 truncate">{p.sku}</div>}
-          <div className="text-[10px] text-white/90 tabular-nums truncate">
-            {fmtDur(p.duracion_min)}
-            {adj && <span className="ml-1 font-semibold">{arrow}{ef.toLocaleString('es-AR')}cj</span>}
-          </div>
+          {h >= 42 && p.sku && <div className="text-[9px] font-mono text-white/75 truncate">{p.sku}</div>}
+          {h >= 28 && (
+            <div className="text-[10px] text-white/90 tabular-nums truncate">
+              {fmtDur(p.duracion_min)}
+              {adj && <span className="ml-1 font-semibold">{arrow}{ef.toLocaleString('es-AR')}cj</span>}
+            </div>
+          )}
         </div>
       </div>
       {/* ✕ al pasar el mouse · doble-click para quitar (solo si puede editar) */}
@@ -958,6 +958,21 @@ function Bloque({ p, puedeEditar, onInfo, onQuitar, onMoveStart, onMoveEnd, onMo
           ✕
         </button>
       )}
+    </div>
+  )
+}
+
+// Chip de setup en el hueco entre dos órdenes consecutivas.
+function SetupGap({ top, h, min, label }: { top: number; h: number; min: number; label?: string }) {
+  return (
+    <div
+      className="absolute left-0 right-0 z-20 flex items-center justify-center pointer-events-none"
+      style={{ top, height: h }}
+      title={`Setup ${min} min${label ? ` · ${label}` : ''}`}
+    >
+      <span className="px-1 rounded bg-amber-100/95 border border-amber-300 text-amber-800 text-[8px] font-semibold leading-tight whitespace-nowrap shadow-sm">
+        ⚙ {min}m{label ? ` · ${label.replace('cambio de ', '')}` : ''}
+      </span>
     </div>
   )
 }
