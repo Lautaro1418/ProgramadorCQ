@@ -736,7 +736,8 @@ export default function ProgramadorPage() {
               {i > 0 && p.setup_min > 0 && zoom !== 'mes' && (
                 <SetupBar min={p.setup_min} label={p.setupLabel} />
               )}
-              <OrderCard p={p} puedeEditar={puedeEditar} compact={zoom === 'mes'}
+              <OrderCard p={p} puedeEditar={puedeEditar}
+                variant={zoom === 'mes' ? 'compact' : zoom === 'dia' ? 'wide' : 'normal'}
                 onInfo={e => setInfo({ id: p.id, x: e.clientX, y: e.clientY })}
                 onQuitar={() => quitar(p)}
                 onMoveStart={() => { setDragBlock(p.id); setDragWo(null) }}
@@ -744,6 +745,8 @@ export default function ProgramadorPage() {
                 onMoveDropHere={() => { if (dragBlock != null && dragBlock !== p.id) moverBloque(dragBlock, p.fecha, p.id); setDragBlock(null); setDragWo(null) }} />
             </Fragment>
           ))}
+          {/* zona para seguir agregando órdenes hacia abajo aunque el día esté lleno */}
+          <div className="flex-1 min-h-[44px]" />
         </div>
       </div>
     )
@@ -970,11 +973,23 @@ export default function ProgramadorPage() {
   )
 }
 
+// Campo etiquetado para la vista diaria (label arriba, valor grande abajo).
+function Campo({ label, value, big, mono, className }: {
+  label: string; value: string; big?: boolean; mono?: boolean; className?: string
+}) {
+  return (
+    <div className={`flex flex-col leading-tight min-w-0 ${className ?? ''}`}>
+      <span className="text-[9px] font-medium uppercase tracking-wide text-stone-500">{label}</span>
+      <span className={`${big ? 'text-[15px] font-bold' : 'text-[13px] font-semibold'} ${mono ? 'font-mono' : ''} truncate`}>{value}</span>
+    </div>
+  )
+}
+
 // ── Tarjeta de orden (lista apilada) ─────────────────────────────────────────
-function OrderCard({ p, puedeEditar, compact, onInfo, onQuitar, onMoveStart, onMoveEnd, onMoveDropHere }: {
+function OrderCard({ p, puedeEditar, variant, onInfo, onQuitar, onMoveStart, onMoveEnd, onMoveDropHere }: {
   p: Programada
   puedeEditar: boolean
-  compact: boolean
+  variant: 'compact' | 'normal' | 'wide'
   onInfo: (e: MouseEvent) => void
   onQuitar: () => void
   onMoveStart: () => void
@@ -985,7 +1000,10 @@ function OrderCard({ p, puedeEditar, compact, onInfo, onQuitar, onMoveStart, onM
   const ef    = cajasEf(p)
   const sys   = p.cajas ?? 0
   const arrow = adj ? (ef > sys ? '↑' : ef < sys ? '↓' : '') : ''
-  const h = compact ? 18 : alturaBloque(p.duracion_min, false)
+  const cant  = `${arrow}${ef.toLocaleString('es-AR')}`
+  const h = variant === 'compact' ? 18
+    : variant === 'wide' ? Math.round(Math.max(60, p.duracion_min * PX_PER_MIN))
+    : alturaBloque(p.duracion_min, false)
   const stripe = p.codEq ? colorDeVino(p.codEq) : '#9ca3af'
 
   return (
@@ -1001,37 +1019,44 @@ function OrderCard({ p, puedeEditar, compact, onInfo, onQuitar, onMoveStart, onM
       <div
         onClick={onInfo}
         style={{ borderLeftColor: stripe }}
-        className={`w-full h-full rounded-md bg-red-800 hover:bg-red-700 text-white overflow-hidden shadow border border-red-950/70 border-l-4 ${puedeEditar ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}`}
+        className={`w-full h-full rounded-md bg-stone-300 hover:bg-stone-200 text-stone-800 overflow-hidden shadow-sm border border-stone-400/70 border-l-[7px] ${puedeEditar ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}`}
       >
-        {compact ? (
+        {variant === 'compact' ? (
           <div className="px-1 h-full flex items-center">
             <span className="text-[9px] font-bold font-mono truncate">{p.wo}</span>
+          </div>
+        ) : variant === 'wide' ? (
+          <div className="flex items-center h-full pl-3 pr-8 gap-x-6 gap-y-1 flex-wrap">
+            <Campo label="ORDEN" value={p.wo} big mono />
+            {p.sku && <Campo label="SKU" value={p.sku} mono />}
+            <Campo label={p.esEstiba ? 'ESTIBA' : 'VINO'} value={p.vinoCode ?? '—'} mono />
+            <Campo label="BOTELLA" value={p.botella ?? '—'} mono />
+            <Campo label="TIEMPO" value={fmtDur(p.duracion_min)} />
+            <Campo label="CAJAS" value={cant} big className="ml-auto text-right" />
           </div>
         ) : (
           <div className="px-1.5 py-1 leading-tight">
             <div className="flex items-baseline justify-between gap-1">
-              <span className="text-[12px] font-bold font-mono truncate">{p.wo}</span>
-              <span className="text-[10px] font-semibold tabular-nums whitespace-nowrap">
-                {arrow}{ef.toLocaleString('es-AR')}<span className="text-white/60"> cj</span>
-              </span>
+              <span className="text-[13px] font-bold font-mono truncate">{p.wo}</span>
+              <span className="text-[11px] font-bold tabular-nums whitespace-nowrap">{cant}<span className="text-stone-500 font-normal"> cj</span></span>
             </div>
-            {p.sku && <div className="text-[9px] font-mono text-white/70 truncate">{p.sku}</div>}
-            <div className="flex items-center justify-between gap-1 text-[9px] text-white/90 mt-0.5">
-              <span className="truncate">{p.esEstiba ? 'est ' : 'vino '}{p.vinoCode ?? '—'}</span>
-              <span className="whitespace-nowrap">bot {p.botella ?? '—'}</span>
+            {p.sku && <div className="text-[10px] font-mono text-stone-500 truncate">{p.sku}</div>}
+            <div className="flex items-center justify-between gap-1 mt-0.5">
+              <span className="text-[12px] font-semibold truncate">{p.vinoCode ?? '—'}{p.esEstiba ? ' est' : ''}</span>
+              <span className="text-[11px] font-medium text-stone-600 whitespace-nowrap">{p.botella ?? '—'}</span>
             </div>
-            <div className="text-[9px] text-white/55 tabular-nums">{fmtDur(p.duracion_min)}</div>
+            <div className="text-[9px] text-stone-500 tabular-nums">{fmtDur(p.duracion_min)}</div>
           </div>
         )}
       </div>
       {/* ✕ al pasar el mouse · doble-click para quitar (solo si puede editar) */}
-      {puedeEditar && !compact && (
+      {puedeEditar && variant !== 'compact' && (
         <button
           onClick={e => e.stopPropagation()}
           onDoubleClick={e => { e.stopPropagation(); onQuitar() }}
           title="Doble-click para quitar del programa"
           aria-label="Quitar (doble-click)"
-          className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-white/90 text-red-700 text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm hover:bg-white"
+          className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-white text-red-700 text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm hover:bg-stone-50"
         >
           ✕
         </button>
