@@ -597,13 +597,10 @@ export default function ProgramadorPage() {
   async function plasmar() {
     if (!linea || !puedeEditar || !draftEnabled) return
     const L = linea
-    const { data: viejos } = await supabase.from('produccion_programada')
-      .select('id').eq('linea', L).eq('estado', 'oficial')
-    // Promover borrador→oficial primero (sin ventana de pérdida), luego borrar el oficial viejo.
+    // Con la unique (wo, estado): 1) borrar el oficial viejo, 2) promover el borrador a oficial.
+    await supabase.from('produccion_programada').delete().eq('linea', L).eq('estado', 'oficial')
     await supabase.from('produccion_programada').update({ estado: 'oficial' })
       .eq('linea', L).eq('estado', 'borrador')
-    const ids = (viejos ?? []).map(r => (r as { id: number }).id)
-    if (ids.length) await supabase.from('produccion_programada').delete().in('id', ids)
     await ensureDraft(L)   // re-forkea un borrador fresco desde el nuevo oficial (incluye cargar)
   }
 
