@@ -75,6 +75,17 @@ hasta que plasmás). Si algo del borrador se ve raro al entrar muy rápido a una
 
 ## Estado actual — lo hecho (mas nuevo arriba)
 
+- **Grilla apilada (rediseño grande, 2026-06-26)**: se abandonó la escala de horas. Cada día es una **lista
+  apilada** (`flex-col`) de tarjetas; el **% diario del header es el medidor de capacidad** (se agregan órdenes
+  hasta 100%). `alturaBloque(min,isSetup)`: alto **mínimo** por bloque (`MIN_ORDER_H=84` para mostrar todos los
+  datos / `MIN_SETUP_H=20`) que **crece** con los minutos (`PX_PER_MIN`). Ya **no** hay eje de horas ni líneas de
+  turno ni posicionamiento absoluto (se borraron `posBloque`/`gruposVino`; `DIA_H` ahora es solo `minHeight` de la
+  columna). El **setup** es un **rectángulo gris** propio entre órdenes (`SetupBar`), nunca encimado. Cada orden
+  (`OrderCard`) muestra **N°, cantidad (cj), SKU, vino, botella** + duración, con una **franja de color a la
+  izquierda** por vino (`colorDeVino(codEq)`); el popover suma SKU/Vino/Botella. Datos nuevos en memoria:
+  `vinoCode` (ISVTPA2091→A2091, ISVTPC1071-25→C1071, ISE→estiba con su código) vía `vinoInfo`, y `botella`
+  (IFR0030A04→A04, últimos 3) vía `botellaCode` desde `producciones_insumos` familia BOTELLA. En **4 sem** las
+  tarjetas van compactas (solo N°) y sin setup.
 - **UX grilla** (2026-06-26): (1) el **setup pasó al hueco entre órdenes** — la producción arranca después del
   setup, que queda como un espacio real con un **chip ámbar** "⚙ 45m · formato" (`SetupGap`); el bloque quedó
   limpio (N°/SKU/duración, **adaptativo al alto**) y se subió `DIA_H` 480→560. `recalcCadena` ahora pone

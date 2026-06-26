@@ -1,5 +1,5 @@
 'use client'
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/contexts/AuthContext'
 import { mondayOf, addDays, toISODate, getISOWeek, semanaDesde, fmtHora } from '@/lib/fechas'
@@ -85,6 +85,9 @@ interface Programada {
   codEq?: string | null           // codigo de vino derivado (en memoria, para agrupar)
   setupLabel?: string             // componente que manda en el setup (en memoria)
   estado?: string                 // 'oficial' | 'borrador' (F2)
+  vinoCode?: string | null        // codigo de vino a mostrar (A2091) — en memoria
+  esEstiba?: boolean              // insumo ISE = estiba — en memoria
+  botella?: string | null         // codigo de botella (A04) — en memoria
 }
 
 // Cajas efectivas: el ajuste manual si existe, si no la de sistema.
@@ -125,15 +128,29 @@ function codEqDeInsumo(insumo: string | null | undefined): string | null {
   return i.startsWith('ISVTP') ? i.replace(/^ISVTP/, '').replace(/-.*$/, '').trim() : i
 }
 
-// Posicion (px) de un bloque en el timeline del dia. La altura es SOLO la producción;
-// el setup vive en el hueco (entre hora_fin del anterior y hora_inicio de este).
-function posBloque(p: Programada): { top: number; h: number } {
-  const ini = new Date(p.hora_inicio)
-  const minM = ini.getHours() * 60 + ini.getMinutes()
-  const top = (minM / 1440) * DIA_H
-  const rawH = (p.duracion_min / 1440) * DIA_H
-  const h = Math.max(20, Math.min(rawH, DIA_H - top))
-  return { top, h }
+// Layout apilado (sin escala de horas): cada bloque tiene un alto MÍNIMO para que se vean
+// sus datos, y crece si la orden/setup demanda más minutos. El % diario es el medidor de capacidad.
+const PX_PER_MIN  = 0.32
+const MIN_ORDER_H = 84   // alcanza para N°, SKU, vino, botella, cantidad
+const MIN_SETUP_H = 20
+function alturaBloque(min: number, isSetup: boolean): number {
+  return Math.round(Math.max(isSetup ? MIN_SETUP_H : MIN_ORDER_H, min * PX_PER_MIN))
+}
+
+// Código de vino para mostrar: ISVTPA2091 → A2091, ISVTPC1071-25 → C1071,
+// ISEC1071A04491 → C1071 (estiba). Devuelve el code + si es estiba.
+function vinoInfo(insumo: string | null | undefined): { code: string | null; estiba: boolean } {
+  if (!insumo) return { code: null, estiba: false }
+  const s = insumo.trim().toUpperCase()
+  const estiba = s.startsWith('ISE')
+  const m = s.replace(/^ISVTP/, '').replace(/^ISE/, '').match(/[A-Z]\d{3,4}/)
+  return { code: m ? m[0] : null, estiba }
+}
+// Código de botella: IFR0030A04 → A04 (los 3 del final).
+function botellaCode(ifr: string | null | undefined): string | null {
+  if (!ifr) return null
+  const s = ifr.trim()
+  return s.length >= 3 ? s.slice(-3) : s
 }
 
 // Color (hsl) determinista por codigo de vino, para el borde del grupo.
@@ -141,22 +158,6 @@ function colorDeVino(key: string): string {
   let hsh = 0
   for (let i = 0; i < key.length; i++) hsh = (hsh * 31 + key.charCodeAt(i)) % 360
   return `hsl(${hsh}, 65%, 42%)`
-}
-
-// Grupos de bloques consecutivos con el mismo vino (para encerrarlos con un borde).
-function gruposVino(bloques: Programada[]): { key: string; top: number; height: number; n: number }[] {
-  const sorted = [...bloques].sort((a, b) => a.orden_en_dia - b.orden_en_dia)
-  const out: { key: string; top: number; height: number; n: number }[] = []
-  let i = 0
-  while (i < sorted.length) {
-    const key = sorted[i].codEq ?? sorted[i].wo
-    let j = i
-    while (j + 1 < sorted.length && (sorted[j + 1].codEq ?? sorted[j + 1].wo) === key) j++
-    const a = posBloque(sorted[i]), b = posBloque(sorted[j])
-    out.push({ key: String(key), top: a.top, height: (b.top + b.h) - a.top, n: j - i + 1 })
-    i = j + 1
-  }
-  return out
 }
 
 // ── Página ───────────────────────────────────────────────────────────────────
@@ -257,9 +258,10 @@ export default function ProgramadorPage() {
     let merged: Programada[] = programadasData
     const progWos = [...new Set(programadasData.map(p => p.wo))]
     if (progWos.length) {
-      const [sysRes, prodVinoRes] = await Promise.all([
+      const [sysRes, prodVinoRes, botRes] = await Promise.all([
         supabase.from('ope_ordenes').select('orden,cajas_jde,cod_item_largo').in('orden', progWos),
         supabase.from('producciones').select('orden,insumo').in('orden', progWos),
+        supabase.from('producciones_insumos').select('orden,insumo').eq('familia', 'BOTELLA').in('orden', progWos),
       ])
       const sysMap = new Map((sysRes.data ?? []).map(r => {
         const rr = r as { orden: unknown; cajas_jde: unknown }
@@ -271,7 +273,11 @@ export default function ProgramadorPage() {
       }))
       const vinoMap = new Map((prodVinoRes.data ?? []).map(r => {
         const rr = r as { orden: unknown; insumo: unknown }
-        return [String(rr.orden), codEqDeInsumo(rr.insumo as string | null)]
+        return [String(rr.orden), vinoInfo(rr.insumo as string | null)]
+      }))
+      const botMap = new Map((botRes.data ?? []).map(r => {
+        const rr = r as { orden: unknown; insumo: unknown }
+        return [String(rr.orden), botellaCode(rr.insumo as string | null)]
       }))
       const diasTocados = new Set<string>()
       merged = programadasData.map(p => {
@@ -301,8 +307,18 @@ export default function ProgramadorPage() {
           }
         }
       }
-      // Enriquecer (en memoria) con SKU + codigo de vino para pintar los bloques
-      merged = merged.map(p => ({ ...p, sku: skuMap.get(p.wo) ?? null, codEq: vinoMap.get(p.wo) ?? null }))
+      // Enriquecer (en memoria) con SKU + vino + botella para pintar los bloques
+      merged = merged.map(p => {
+        const v = vinoMap.get(p.wo)
+        return {
+          ...p,
+          sku: skuMap.get(p.wo) ?? null,
+          codEq: v?.code ?? null,
+          vinoCode: v?.code ?? null,
+          esEstiba: v?.estiba ?? false,
+          botella: botMap.get(p.wo) ?? null,
+        }
+      })
     }
 
     // Recalcular el timeline en memoria con setups reales (corrige el setup fijo viejo).
@@ -683,7 +699,7 @@ export default function ProgramadorPage() {
     : zoom === 'mes'
       ? `Sem ${getISOWeek(monday)}–${getISOWeek(addDays(monday, 21))} · ${toISODate(monday).slice(5)}→${toISODate(addDays(monday, 27)).slice(5)}`
       : `Semana ${getISOWeek(monday)} · ${toISODate(monday).slice(5)}→${toISODate(addDays(monday, 6)).slice(5)}`
-  const colMin  = zoom === 'dia' ? 360 : zoom === 'mes' ? 46 : 92
+  const colMin  = zoom === 'dia' ? 360 : zoom === 'mes' ? 46 : 108
   const gridMin = 40 + dias.length * colMin
 
   // % de uso de un día (capacidad del turno de la semana de ese día). -1 = sin turno ese día.
@@ -875,26 +891,13 @@ export default function ProgramadorPage() {
         {/* ── Grilla Gantt semanal ── */}
         <div className="bg-white border border-stone-200 rounded-xl p-3 overflow-x-auto">
           <div className="flex" style={{ minWidth: gridMin }}>
-            {/* Eje de horas */}
-            <div className="shrink-0 w-9 pt-7">
-              <div className="relative" style={{ height: DIA_H }}>
-                {Array.from({ length: 9 }, (_, i) => i * 3).map(h => (
-                  <div key={h} className="absolute left-0 right-0 text-[9px] text-stone-400 tabular-nums -translate-y-1/2"
-                    style={{ top: (h / 24) * DIA_H }}>
-                    {String(h).padStart(2, '0')}h
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Columnas de días */}
             {dias.map(d => {
               const bloques = progLinea
                 .filter(p => p.fecha === d.iso)
                 .sort((a, b) => a.orden_en_dia - b.orden_en_dia)
               const isToday = d.iso === toISODate(new Date())
               return (
-                <div key={d.iso} className="flex-1 border-l border-stone-100" style={{ minWidth: colMin }}>
+                <div key={d.iso} className="flex-1 flex flex-col border-l border-stone-100" style={{ minWidth: colMin }}>
                   {/* Encabezado del día (click = zoom a ese día) */}
                   <button
                     onClick={() => (zoom === 'dia' ? setZoom('semana') : verDia(d.iso))}
@@ -905,7 +908,7 @@ export default function ProgramadorPage() {
                     <PctBadge pct={pctDia(d.iso)} />
                   </button>
 
-                  {/* Timeline drop-zone */}
+                  {/* Lista apilada de órdenes (drop-zone) */}
                   <div
                     onDragOver={e => e.preventDefault()}
                     onDrop={() => {
@@ -915,40 +918,23 @@ export default function ProgramadorPage() {
                       }
                       setDragWo(null); setDragBlock(null)
                     }}
-                    className={`relative mx-0.5 rounded-md border border-dashed transition-colors ${
+                    className={`flex-1 flex flex-col gap-0.5 mx-0.5 p-0.5 rounded-md border border-dashed transition-colors ${
                       (dragWo || dragBlock != null) ? 'border-red-300 bg-red-50/40' : 'border-stone-200 bg-stone-50/40'
                     }`}
-                    style={{ height: DIA_H }}
+                    style={{ minHeight: DIA_H }}
                   >
-                    {/* Líneas de turno (06/14/22) */}
-                    {[6, 14, 22].map(h => (
-                      <div key={h} className="absolute left-0 right-0 border-t border-stone-200/70"
-                        style={{ top: (h / 24) * DIA_H }} />
-                    ))}
-
-                    {/* Borde de grupo de vino (órdenes consecutivas del mismo vino) */}
-                    {gruposVino(bloques).filter(g => g.n >= 2).map((g, gi) => (
-                      <div key={`g${gi}`} className="absolute left-0 right-0 rounded-md pointer-events-none z-0"
-                        style={{ top: g.top - 2, height: g.height + 4, border: `2px solid ${colorDeVino(g.key)}` }} />
-                    ))}
-
-                    {/* Setup en el HUECO entre órdenes (chip) — se oculta en 4 semanas por falta de ancho */}
-                    {zoom !== 'mes' && bloques.map((p, i) => {
-                      if (i === 0 || p.setup_min <= 0) return null
-                      const prev = bloques[i - 1]
-                      const pf = new Date(prev.hora_fin)
-                      const gapTop = ((pf.getHours() * 60 + pf.getMinutes()) / 1440) * DIA_H
-                      const gapH = Math.max(0, (p.setup_min / 1440) * DIA_H)
-                      return <SetupGap key={`s${p.id}`} top={gapTop} h={gapH} min={p.setup_min} label={p.setupLabel} />
-                    })}
-
-                    {bloques.map(p => (
-                      <Bloque key={p.id} p={p} puedeEditar={puedeEditar}
-                        onInfo={e => setInfo({ id: p.id, x: e.clientX, y: e.clientY })}
-                        onQuitar={() => quitar(p)}
-                        onMoveStart={() => { setDragBlock(p.id); setDragWo(null) }}
-                        onMoveEnd={() => { setDragBlock(null); setDragWo(null) }}
-                        onMoveDropHere={() => { if (dragBlock != null && dragBlock !== p.id) moverBloque(dragBlock, p.fecha, p.id); setDragBlock(null); setDragWo(null) }} />
+                    {bloques.map((p, i) => (
+                      <Fragment key={p.id}>
+                        {i > 0 && p.setup_min > 0 && zoom !== 'mes' && (
+                          <SetupBar min={p.setup_min} label={p.setupLabel} />
+                        )}
+                        <OrderCard p={p} puedeEditar={puedeEditar} compact={zoom === 'mes'}
+                          onInfo={e => setInfo({ id: p.id, x: e.clientX, y: e.clientY })}
+                          onQuitar={() => quitar(p)}
+                          onMoveStart={() => { setDragBlock(p.id); setDragWo(null) }}
+                          onMoveEnd={() => { setDragBlock(null); setDragWo(null) }}
+                          onMoveDropHere={() => { if (dragBlock != null && dragBlock !== p.id) moverBloque(dragBlock, p.fecha, p.id); setDragBlock(null); setDragWo(null) }} />
+                      </Fragment>
                     ))}
                   </div>
                 </div>
@@ -959,9 +945,9 @@ export default function ProgramadorPage() {
       </div>
 
       <p className="text-[11px] text-stone-400 mt-3">
-        Arrastrá una WO del panel izquierdo a un día para programarla en la línea <b>{linea}</b>.
-        La duración se calcula por cajas ÷ velocidad de línea + setup. <b>Click</b> en un bloque para ver su info ·
-        pasá el mouse y <b>doble-click en la ✕</b> para quitarlo.
+        Arrastrá una WO del panel izquierdo a un día y agregá órdenes hasta llegar al <b>100%</b> (el % de cada día
+        es el medidor de capacidad). El gris entre órdenes es el <b>setup</b>. <b>Click</b> en una orden para ver el
+        detalle · pasá el mouse y <b>doble-click en la ✕</b> para quitarla. Arrastrá una orden sobre otra para reordenar.
       </p>
 
       {/* Popover de info al hacer click en un bloque */}
@@ -974,26 +960,28 @@ export default function ProgramadorPage() {
   )
 }
 
-// ── Bloque del Gantt ─────────────────────────────────────────────────────────
-function Bloque({ p, puedeEditar, onInfo, onQuitar, onMoveStart, onMoveEnd, onMoveDropHere }: {
+// ── Tarjeta de orden (lista apilada) ─────────────────────────────────────────
+function OrderCard({ p, puedeEditar, compact, onInfo, onQuitar, onMoveStart, onMoveEnd, onMoveDropHere }: {
   p: Programada
   puedeEditar: boolean
+  compact: boolean
   onInfo: (e: MouseEvent) => void
   onQuitar: () => void
   onMoveStart: () => void
   onMoveEnd: () => void
   onMoveDropHere: () => void
 }) {
-  const { top, h } = posBloque(p)
   const adj   = p.cajas_ajustado != null
   const ef    = cajasEf(p)
   const sys   = p.cajas ?? 0
   const arrow = adj ? (ef > sys ? '↑' : ef < sys ? '↓' : '') : ''
+  const h = compact ? 18 : alturaBloque(p.duracion_min, false)
+  const stripe = p.codEq ? colorDeVino(p.codEq) : '#9ca3af'
 
   return (
     <div
-      className="group absolute left-0.5 right-0.5 z-10"
-      style={{ top, height: h }}
+      className="group relative shrink-0"
+      style={{ height: h }}
       draggable={puedeEditar}
       onDragStart={e => { if (!puedeEditar) { e.preventDefault(); return } e.stopPropagation(); onMoveStart() }}
       onDragEnd={onMoveEnd}
@@ -1002,22 +990,32 @@ function Bloque({ p, puedeEditar, onInfo, onQuitar, onMoveStart, onMoveEnd, onMo
     >
       <div
         onClick={onInfo}
-        className={`w-full h-full rounded-md bg-red-800 hover:bg-red-700 text-white overflow-hidden shadow border-2 border-red-950/70 flex flex-col ${puedeEditar ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}`}
+        style={{ borderLeftColor: stripe }}
+        className={`w-full h-full rounded-md bg-red-800 hover:bg-red-700 text-white overflow-hidden shadow border border-red-950/70 border-l-4 ${puedeEditar ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}`}
       >
-        {/* Contenido: N° de orden grande + (SKU) + duración — adaptativo al alto */}
-        <div className="flex-1 min-h-0 px-1.5 py-0.5 overflow-hidden leading-tight">
-          <div className="text-[13px] font-bold font-mono truncate">{p.wo}</div>
-          {h >= 42 && p.sku && <div className="text-[9px] font-mono text-white/75 truncate">{p.sku}</div>}
-          {h >= 28 && (
-            <div className="text-[10px] text-white/90 tabular-nums truncate">
-              {fmtDur(p.duracion_min)}
-              {adj && <span className="ml-1 font-semibold">{arrow}{ef.toLocaleString('es-AR')}cj</span>}
+        {compact ? (
+          <div className="px-1 h-full flex items-center">
+            <span className="text-[9px] font-bold font-mono truncate">{p.wo}</span>
+          </div>
+        ) : (
+          <div className="px-1.5 py-1 leading-tight">
+            <div className="flex items-baseline justify-between gap-1">
+              <span className="text-[12px] font-bold font-mono truncate">{p.wo}</span>
+              <span className="text-[10px] font-semibold tabular-nums whitespace-nowrap">
+                {arrow}{ef.toLocaleString('es-AR')}<span className="text-white/60"> cj</span>
+              </span>
             </div>
-          )}
-        </div>
+            {p.sku && <div className="text-[9px] font-mono text-white/70 truncate">{p.sku}</div>}
+            <div className="flex items-center justify-between gap-1 text-[9px] text-white/90 mt-0.5">
+              <span className="truncate">{p.esEstiba ? 'est ' : 'vino '}{p.vinoCode ?? '—'}</span>
+              <span className="whitespace-nowrap">bot {p.botella ?? '—'}</span>
+            </div>
+            <div className="text-[9px] text-white/55 tabular-nums">{fmtDur(p.duracion_min)}</div>
+          </div>
+        )}
       </div>
       {/* ✕ al pasar el mouse · doble-click para quitar (solo si puede editar) */}
-      {puedeEditar && (
+      {puedeEditar && !compact && (
         <button
           onClick={e => e.stopPropagation()}
           onDoubleClick={e => { e.stopPropagation(); onQuitar() }}
@@ -1046,19 +1044,18 @@ function PctBadge({ pct }: { pct: number }) {
   )
 }
 
-// Setup = rectángulo propio que separa dos órdenes (llena el hueco, sin encimarse).
-function SetupGap({ top, h, min, label }: { top: number; h: number; min: number; label?: string }) {
+// Setup = rectángulo gris propio que separa dos órdenes (alto mínimo, crece con los minutos).
+function SetupBar({ min, label }: { min: number; label?: string }) {
+  const h = alturaBloque(min, true)
   return (
     <div
-      className="absolute left-0.5 right-0.5 z-0 overflow-hidden rounded-sm border border-amber-300 bg-amber-100 flex items-center justify-center pointer-events-none"
-      style={{ top, height: h }}
+      className="shrink-0 rounded-md border border-stone-300 bg-stone-200 text-stone-600 flex items-center justify-center overflow-hidden"
+      style={{ height: h }}
       title={`Setup ${min} min${label ? ` · ${label}` : ''}`}
     >
-      {h >= 11 && (
-        <span className="text-[8px] font-semibold text-amber-800 leading-none whitespace-nowrap px-1">
-          ⚙ {min}m{label ? ` · ${label.replace('cambio de ', '')}` : ''}
-        </span>
-      )}
+      <span className="text-[8px] font-semibold leading-none whitespace-nowrap px-1 truncate">
+        ⚙ {min}m{label ? ` · ${label.replace('cambio de ', '')}` : ''}
+      </span>
     </div>
   )
 }
@@ -1095,6 +1092,9 @@ function InfoPopover({ p, x, y, puedeEditar, onClose, onAjustar }: {
           <Row k="Total" v={`${totalMin} min`} />
           <Row k="Producción" v={`${p.duracion_min} min`} />
           <Row k="Setup" v={p.setup_min > 0 ? `${p.setup_min} min${p.setupLabel ? ` · ${p.setupLabel}` : ''}` : '—'} />
+          <Row k="SKU" v={p.sku ?? '—'} />
+          <Row k={p.esEstiba ? 'Estiba' : 'Vino'} v={p.vinoCode ?? '—'} />
+          <Row k="Botella" v={p.botella ?? '—'} />
           <Row k="Fracc." v={p.fraccionado ?? '—'} />
         </dl>
 
