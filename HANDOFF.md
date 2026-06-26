@@ -37,18 +37,51 @@ npm run build    # valida (anda offline: no usa next/font/google)
 ## Stack
 Next.js 16.2.6 (Turbopack) · React 19 · Tailwind 4 · `@supabase/supabase-js`. Sin `next/font/google`.
 
-## Tablas Supabase que usa
-- **Lee**: `perfiles` (auth) + `categorias_usuario`/`categoria_permisos` (rol, a portar en F1),
-  `ope_ordenes` (backlog), `velocidades_botella` (velocidad), `producciones_insumos` (botella IFR por WO).
-- **Lee/Escribe**: `produccion_programada` (el programa: insert al programar, delete al quitar,
-  update al ajustar/recalcular). `linea_edicion` (lock por linea, F1).
-- No escribe a JDE.
+## Tablas Supabase que usa (verificado por `.from(...)` el 2026-06-26)
 
-### Migraciones ya corridas en Supabase (estan en `migrations/`)
-- `produccion_programada.sql` — tabla base del Gantt (ya existia).
-- `cajas_ajustado` — `alter table produccion_programada add column if not exists cajas_ajustado numeric;` (Lote 1b).
-- `linea_edicion` — tabla del lock por linea (F1). Falta activar Realtime de esa tabla en
-  Database -> Replication cuando se cablee.
+Comparte la base con ProgramacionCQ. **Solo ESCRIBE en 4 tablas propias; el resto las LEE.** No escribe a JDE.
+
+### Escribe (propias de esta app)
+- **`produccion_programada`** — EL programa. `insert` (programar), `delete` (quitar), `update` (ajustar / mover /
+  recalcular cadena), `update estado` (Plasmar/fork). Columnas: `id, wo, linea, fecha, hora_inicio, hora_fin,
+  duracion_min, setup_min, orden_en_dia, descripcion, cajas, cajas_ajustado, fraccionado, usuario_email,
+  usuario_nombre, estado` ('oficial'|'borrador'). **Unique `(wo, estado)`** (migración `..._wo_estado.sql`).
+- **`capacidad_linea`** (F4) — `select`/`upsert`. `(linea, semana=lunes ISO, turno, paradas_op, paradas_ext)`.
+- **`linea_edicion`** (F1b lock) — `select`/`upsert`/`update`/`delete`. `(linea, usuario_email, usuario_nombre, last_seen)`.
+- **`refresh_log`** (F5) — `insert(status='pendiente')` + `select(status)`. Dispara el sync (watcher de ProgramacionCQ).
+
+### Lee — datos de JDE (los puebla el SYNC de ProgramacionCQ, esta app no los genera)
+- **`ope_ordenes`** — backlog (estado≥40, ≠99) + merge. Cols: `orden, descripcion, cajas_jde, cant_declarada,
+  linea_fracc, fe_solicitada, estado, cod_item_largo` (= SKU).
+- **`producciones`** — insumo activo por orden → vino/estiba. Cols: `orden, insumo, producto, producto_descripcion`.
+- **`producciones_insumos`** — botella IFR + formato. Cols: `orden, insumo, familia` (='BOTELLA'), `fe_solicitada`.
+
+### Lee — config / estáticas (seteadas y mantenidas en ProgramacionCQ)
+- **`velocidades_botella`** `(codigo, tipo, linea, botellas_hora)` — velocidad/duración.
+- **`setup_formato` / `setup_velcorin` / `setup_azucar` / `setup_caja` / `setup_etiqueta` / `setup_vino`** (F3, setups reales).
+- **`producto_atributos`** `(codigo, color, n_formato, velcorin, azucar, caja)`.
+- **`insumo_formato`** `(producto, n_formato)` · **`vino_equivalencias`** `(codigo_vino, codigo_equiv)`.
+
+### Lee — auth (compartido)
+- **`perfiles`** `(user_id, nombre, email, categoria_id)` · **`categoria_permisos`** `(pagina, puede_ver, puede_editar)`
+  → `isAdmin = permisos['configuracion'].puede_ver`.
+
+### Realtime (postgres_changes)
+- **`linea_edicion`** (indicador "quién edita") y **`produccion_programada`** (ver el Plasmar al instante).
+
+### Cómo verificar que "la info está OK"
+La app depende de que el **sync de ProgramacionCQ** mantenga pobladas `ope_ordenes` / `producciones` /
+`producciones_insumos`, y de que las estáticas estén bien. Síntomas si falta algo:
+- **botella "—"** → la WO no tiene fila `familia='BOTELLA'` en `producciones_insumos`.
+- **vino "—"** → falta/!match `producciones.insumo` (o no es ISVTP/ISE).
+- **duración 0 o rara** → falta `velocidades_botella` para esa botella/línea (ver bug directo/vestido abajo).
+- **setup raro / 0** → revisar `setup_*` + `producto_atributos` + `insumo_formato` de las 2 órdenes.
+
+### Migraciones (en `migrations/`)
+- Ya corridas: `produccion_programada.sql` (base), `cajas_ajustado` (Lote 1b), `linea_edicion.sql` (F1b),
+  `capacidad_linea.sql` (F4), `borrador.sql` (F2, col `estado`).
+- **Pendientes de correr**: `produccion_programada_wo_estado.sql` (**unique (wo,estado)** — sin esto el fork del
+  borrador rompe) y `realtime_programa.sql` (Realtime del oficial). Ver "Acciones manuales pendientes".
 
 ## Logica de calculo (`lib/duracion.ts`)
 `minutos = (cajas_efectivas x botellas_por_caja) / botellas_hora x 60 + setup`.
