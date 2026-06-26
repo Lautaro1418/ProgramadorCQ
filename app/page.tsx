@@ -1046,17 +1046,19 @@ function PctBadge({ pct }: { pct: number }) {
   )
 }
 
-// Chip de setup en el hueco entre dos órdenes consecutivas.
+// Setup = rectángulo propio que separa dos órdenes (llena el hueco, sin encimarse).
 function SetupGap({ top, h, min, label }: { top: number; h: number; min: number; label?: string }) {
   return (
     <div
-      className="absolute left-0 right-0 z-20 flex items-center justify-center pointer-events-none"
+      className="absolute left-0.5 right-0.5 z-0 overflow-hidden rounded-sm border border-amber-300 bg-amber-100 flex items-center justify-center pointer-events-none"
       style={{ top, height: h }}
       title={`Setup ${min} min${label ? ` · ${label}` : ''}`}
     >
-      <span className="px-1 rounded bg-amber-100/95 border border-amber-300 text-amber-800 text-[8px] font-semibold leading-tight whitespace-nowrap shadow-sm">
-        ⚙ {min}m{label ? ` · ${label.replace('cambio de ', '')}` : ''}
-      </span>
+      {h >= 11 && (
+        <span className="text-[8px] font-semibold text-amber-800 leading-none whitespace-nowrap px-1">
+          ⚙ {min}m{label ? ` · ${label.replace('cambio de ', '')}` : ''}
+        </span>
+      )}
     </div>
   )
 }
