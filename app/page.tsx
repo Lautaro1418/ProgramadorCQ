@@ -8,6 +8,7 @@ import {
   type DuracionMaps, type VelocidadRow, type InsumoBotellaRow,
 } from '@/lib/duracion'
 import { buildSetupMaps, emptySetupMaps, setupEntre, type SetupMaps } from '@/lib/setups'
+import RefreshButton from '@/components/RefreshButton'
 
 // ── Constantes ───────────────────────────────────────────────────────────────
 const LINEAS = ['L1', 'L2', 'L0', 'TM'] as const
@@ -578,6 +579,7 @@ export default function ProgramadorPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          <RefreshButton onComplete={cargar} />
           <button onClick={() => setMonday(m => addDays(m, -7))}
             className="px-2.5 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-600 text-sm">←</button>
           <div className="text-sm font-medium text-stone-700 min-w-[150px] text-center">
