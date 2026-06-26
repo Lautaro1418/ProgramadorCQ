@@ -66,8 +66,8 @@ function recalcCadena(delDia: Programada[], lineaKey: string, fechaIso: string, 
 
 // ── Página ───────────────────────────────────────────────────────────────────
 export default function ProgramadorPage() {
-  const { perfil } = useAuth()
-  const [linea, setLinea]   = useState<Linea>('L1')
+  const { perfil, isAdmin } = useAuth()
+  const [linea, setLinea]   = useState<Linea | null>(null)
   const [monday, setMonday] = useState(() => mondayOf(new Date()))
   const [backlog, setBacklog]       = useState<WoBacklog[]>([])
   const [programadas, setProgramadas] = useState<Programada[]>([])
@@ -183,6 +183,7 @@ export default function ProgramadorPage() {
 
   // ── Programar una WO (drop sobre un día) ─────────────────────────────────────
   async function programar(wo: WoBacklog, fechaIso: string) {
+    if (!linea) return
     // Bloques existentes de esta línea+día, para encadenar al final
     const delDia = programadas
       .filter(p => p.linea === linea && p.fecha === fechaIso)
@@ -262,12 +263,23 @@ export default function ProgramadorPage() {
   )
 
   const infoBlock = info ? (programadas.find(p => p.id === info.id) ?? null) : null
+  const puedeEditar = isAdmin   // F1b agregará el lock por línea
+
+  // Pantalla de selección de línea al entrar
+  if (linea === null) {
+    return <SelectorLinea isAdmin={isAdmin} onPick={l => setLinea(l)} />
+  }
 
   return (
     <div className="w-full">
       {/* Pestañas de línea + navegación de semana */}
       <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
-        <div className="flex gap-1.5">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <button onClick={() => setLinea(null)} title="Cambiar de línea"
+            className="px-2.5 py-2 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-500 text-sm">⟵</button>
+          {!puedeEditar && (
+            <span className="text-[11px] font-medium px-2 py-1 rounded-full bg-amber-100 text-amber-800">Solo lectura</span>
+          )}
           {LINEAS.map(l => {
             const n = programadas.filter(p => p.linea === l).length
             return (
@@ -327,10 +339,10 @@ export default function ProgramadorPage() {
             {backlogVisible.map(w => (
               <div
                 key={w.orden}
-                draggable
-                onDragStart={() => setDragWo(w.orden)}
+                draggable={puedeEditar}
+                onDragStart={() => { if (puedeEditar) setDragWo(w.orden) }}
                 onDragEnd={() => setDragWo(null)}
-                className={`border rounded-lg px-2.5 py-2 cursor-grab active:cursor-grabbing transition-colors ${
+                className={`border rounded-lg px-2.5 py-2 transition-colors ${puedeEditar ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'} ${
                   dragWo === w.orden ? 'border-red-400 bg-red-50' : 'border-stone-200 bg-stone-50 hover:border-stone-300'
                 }`}
               >
@@ -384,8 +396,10 @@ export default function ProgramadorPage() {
                   <div
                     onDragOver={e => e.preventDefault()}
                     onDrop={() => {
-                      const wo = backlog.find(w => w.orden === dragWo)
-                      if (wo) programar(wo, d.iso)
+                      if (puedeEditar) {
+                        const wo = backlog.find(w => w.orden === dragWo)
+                        if (wo) programar(wo, d.iso)
+                      }
                       setDragWo(null)
                     }}
                     className={`relative mx-0.5 rounded-md border border-dashed transition-colors ${
@@ -400,7 +414,7 @@ export default function ProgramadorPage() {
                     ))}
 
                     {bloques.map(p => (
-                      <Bloque key={p.id} p={p}
+                      <Bloque key={p.id} p={p} puedeEditar={puedeEditar}
                         onInfo={e => setInfo({ id: p.id, x: e.clientX, y: e.clientY })}
                         onQuitar={() => quitar(p)} />
                     ))}
@@ -420,7 +434,7 @@ export default function ProgramadorPage() {
 
       {/* Popover de info al hacer click en un bloque */}
       {info && infoBlock && (
-        <InfoPopover p={infoBlock} x={info.x} y={info.y}
+        <InfoPopover p={infoBlock} x={info.x} y={info.y} puedeEditar={puedeEditar}
           onClose={() => setInfo(null)}
           onAjustar={v => ajustarCajas(infoBlock, v)} />
       )}
@@ -429,8 +443,9 @@ export default function ProgramadorPage() {
 }
 
 // ── Bloque del Gantt ─────────────────────────────────────────────────────────
-function Bloque({ p, onInfo, onQuitar }: {
+function Bloque({ p, puedeEditar, onInfo, onQuitar }: {
   p: Programada
+  puedeEditar: boolean
   onInfo: (e: MouseEvent) => void
   onQuitar: () => void
 }) {
@@ -467,23 +482,25 @@ function Bloque({ p, onInfo, onQuitar }: {
           </div>
         )}
       </div>
-      {/* ✕ al pasar el mouse · doble-click para quitar */}
-      <button
-        onClick={e => e.stopPropagation()}
-        onDoubleClick={e => { e.stopPropagation(); onQuitar() }}
-        title="Doble-click para quitar del programa"
-        aria-label="Quitar (doble-click)"
-        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-white/90 text-red-700 text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm hover:bg-white"
-      >
-        ✕
-      </button>
+      {/* ✕ al pasar el mouse · doble-click para quitar (solo si puede editar) */}
+      {puedeEditar && (
+        <button
+          onClick={e => e.stopPropagation()}
+          onDoubleClick={e => { e.stopPropagation(); onQuitar() }}
+          title="Doble-click para quitar del programa"
+          aria-label="Quitar (doble-click)"
+          className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-white/90 text-red-700 text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm hover:bg-white"
+        >
+          ✕
+        </button>
+      )}
     </div>
   )
 }
 
 // ── Popover de info de un bloque (click) ──────────────────────────────────────
-function InfoPopover({ p, x, y, onClose, onAjustar }: {
-  p: Programada; x: number; y: number; onClose: () => void; onAjustar: (nuevo: number | null) => void
+function InfoPopover({ p, x, y, puedeEditar, onClose, onAjustar }: {
+  p: Programada; x: number; y: number; puedeEditar: boolean; onClose: () => void; onAjustar: (nuevo: number | null) => void
 }) {
   const totalMin = p.setup_min + p.duracion_min
   const sys = p.cajas ?? 0
@@ -525,30 +542,36 @@ function InfoPopover({ p, x, y, onClose, onAjustar }: {
               {arrow && <span className="mr-0.5">{arrow}</span>}{ef.toLocaleString('es-AR')}
             </span>
           </div>
-          <div className="flex items-center gap-1.5">
-            <input
-              type="number" value={val} min={0}
-              onChange={e => setVal(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') onAjustar(Number(val) || 0) }}
-              className="flex-1 w-full border border-stone-200 rounded-md px-2 py-1 text-xs tabular-nums focus:outline-none focus:border-red-400"
-            />
-            <button onClick={() => onAjustar(Number(val) || 0)}
-              className="px-2.5 py-1 rounded-md bg-red-900 text-onbrand text-[11px] font-medium hover:bg-red-800 shrink-0">
-              Ajustar
-            </button>
-            {adj && (
-              <button onClick={() => { setVal(String(sys)); onAjustar(null) }} title="Volver a la cantidad de sistema"
-                className="px-2 py-1 rounded-md border border-stone-200 text-stone-500 text-[11px] hover:bg-stone-50 shrink-0">↺</button>
-            )}
-          </div>
-          <p className="text-[10px] text-stone-400 mt-1.5 leading-snug">
-            El ajuste se descarta solo cuando el sistema cambie esta cantidad.
-          </p>
+          {puedeEditar && (
+            <>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="number" value={val} min={0}
+                  onChange={e => setVal(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') onAjustar(Number(val) || 0) }}
+                  className="flex-1 w-full border border-stone-200 rounded-md px-2 py-1 text-xs tabular-nums focus:outline-none focus:border-red-400"
+                />
+                <button onClick={() => onAjustar(Number(val) || 0)}
+                  className="px-2.5 py-1 rounded-md bg-red-900 text-onbrand text-[11px] font-medium hover:bg-red-800 shrink-0">
+                  Ajustar
+                </button>
+                {adj && (
+                  <button onClick={() => { setVal(String(sys)); onAjustar(null) }} title="Volver a la cantidad de sistema"
+                    className="px-2 py-1 rounded-md border border-stone-200 text-stone-500 text-[11px] hover:bg-stone-50 shrink-0">↺</button>
+                )}
+              </div>
+              <p className="text-[10px] text-stone-400 mt-1.5 leading-snug">
+                El ajuste se descarta solo cuando el sistema cambie esta cantidad.
+              </p>
+            </>
+          )}
         </div>
 
-        <p className="text-[10px] text-stone-400 mt-2 leading-snug">
-          Para quitar: pasá el mouse sobre el bloque y doble-click en la ✕.
-        </p>
+        {puedeEditar && (
+          <p className="text-[10px] text-stone-400 mt-2 leading-snug">
+            Para quitar: pasá el mouse sobre el bloque y doble-click en la ✕.
+          </p>
+        )}
       </div>
     </>
   )
@@ -559,6 +582,29 @@ function Row({ k, v }: { k: string; v: string }) {
     <div className="flex justify-between gap-3">
       <dt className="text-stone-400">{k}</dt>
       <dd className="text-stone-700 font-medium text-right">{v}</dd>
+    </div>
+  )
+}
+
+// ── Selección de línea al entrar ──────────────────────────────────────────────
+function SelectorLinea({ isAdmin, onPick }: { isAdmin: boolean; onPick: (l: Linea) => void }) {
+  return (
+    <div className="min-h-[70vh] flex flex-col items-center justify-center text-center px-4">
+      <h1 className="text-xl font-bold text-stone-800 mb-1">¿A qué línea querés entrar?</h1>
+      <p className="text-sm text-stone-500 mb-6">
+        {isAdmin
+          ? 'Como programador podés ver y editar.'
+          : 'Modo solo lectura (visita): vas a poder ver, pero no modificar.'}
+      </p>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {LINEAS.map(l => (
+          <button key={l} onClick={() => onPick(l)}
+            className="w-28 h-24 rounded-xl border border-stone-200 bg-white hover:border-red-400 hover:bg-red-50/40 shadow-sm flex flex-col items-center justify-center transition-colors">
+            <span className="text-2xl font-bold text-stone-800">{l}</span>
+            <span className="text-[11px] text-stone-400 mt-1">{l === 'TM' ? 'Tareas manuales' : 'Fraccionamiento'}</span>
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
