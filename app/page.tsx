@@ -389,9 +389,33 @@ export default function ProgramadorPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draftEnabled, linea, isAdmin, locks, perfil?.email])
 
+  // F2: cuando alguien PLASMA (cambia el oficial), recargar para verlo al instante.
+  // Se ignoran los cambios de borrador (no los ve nadie más) y los de mis propias líneas
+  // tomadas (no interrumpir mi edición). Requiere Realtime de produccion_programada.
+  useEffect(() => {
+    if (!draftEnabled) return
+    let t: ReturnType<typeof setTimeout> | null = null
+    const scheduleReload = () => { if (t) clearTimeout(t); t = setTimeout(() => cargar(), 800) }
+    const ch = supabase.channel('rt-programa')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'produccion_programada' }, payload => {
+        const row = (payload.new ?? payload.old ?? {}) as { linea?: string; estado?: string }
+        if (row.estado === 'borrador') return                    // borradores: privados
+        if (row.linea && heldRef.current.has(row.linea)) return  // mi propia línea: no pisar
+        scheduleReload()
+      })
+      .subscribe()
+    return () => { if (t) clearTimeout(t); supabase.removeChannel(ch) }
+  }, [draftEnabled, cargar])
+
   // ── Programar una WO (drop sobre un día) ─────────────────────────────────────
   async function programar(wo: WoBacklog, fechaIso: string) {
     if (!linea) return
+    // F2: asegurar que el borrador exista antes de agregar (evita ver solo la WO nueva
+    // si se suelta apenas se entra a la línea, antes de que termine el fork)
+    if (draftEnabled && lockMioDe(locks, linea, perfil?.email)
+        && !programadas.some(p => p.linea === linea && p.estado === 'borrador')) {
+      await ensureDraft(linea)
+    }
     // Bloques existentes de esta línea+día, para encadenar al final (vista efectiva)
     const delDia = programadasVisible
       .filter(p => p.linea === linea && p.fecha === fechaIso)

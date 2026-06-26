@@ -61,14 +61,13 @@ Next.js 16.2.6 (Turbopack) · React 19 · Tailwind 4 · `@supabase/supabase-js`.
 
 ## Acciones manuales pendientes (las corre Lautaro en Supabase)
 
-**1) Correr en Supabase → SQL Editor** (independientes entre sí):
-- `migrations/capacidad_linea.sql` — habilita el panel de capacidad / turnos / % de uso (F4).
-- `migrations/borrador.sql` — habilita el borrador privado + botón "Plasmar Programa" (F2).
-  **Hasta correrla, la app funciona EXACTAMENTE como antes** (todos editan el oficial directo, sin borrador).
-- `migrations/linea_edicion.sql` — solo si todavía no se corrió (lock por línea, F1b).
+**Ya corridas por Lautaro (2026-06-26):** `capacidad_linea.sql` (F4), `borrador.sql` (F2),
+`linea_edicion.sql` (F1b) + Realtime de `linea_edicion` activado.
 
-**2) Supabase → Database → Replication**, activar Realtime de:
-- `linea_edicion` — para que el indicador "quién edita" sea instantáneo (sin esto anda igual, por poll de 30s).
+**Falta correr (SQL Editor):**
+- `migrations/realtime_programa.sql` — Realtime del programa oficial, para que el resto vea el "Plasmar"
+  al instante. Es `alter publication supabase_realtime add table produccion_programada` (idempotente).
+  Sin esto, F2 funciona igual pero el resto ve el plasmado al recargar / con Actualizar.
 
 **3) Probar** (idealmente con 2 usuarios admin): entrar a la misma línea (el 2º ve 🔒 + "la edita Fulano"),
 tocar turno/paradas y ver el % de uso, y el flujo **borrador → "Plasmar Programa"** (el resto ve el oficial
@@ -83,9 +82,11 @@ hasta que plasmás). Si algo del borrador se ve raro al entrar muy rápido a una
   vuelve al oficial. **Seguro por capability-flag**: si la columna `estado` NO existe (antes de la migración),
   `draftEnabled=false` y la app se comporta EXACTAMENTE como antes (cero ruptura). `programadasVisible` decide por
   línea si mostrar borrador (la edito yo, con lock) u oficial. Migración **`migrations/borrador.sql`**.
-  Limitaciones (follow-ups): el "resto ve el plasmado al instante" por Realtime de `produccion_programada` quedó
-  pendiente — hoy lo ven al recargar / con Actualizar; y hay una ventana mínima de carrera si soltás una WO en el
-  primer ~segundo de entrar a una línea (antes de terminar el fork) → si pasa, "Descartar" lo arregla.
+  **Realtime del oficial HECHO**: al **Plasmar**, el resto lo ve al instante (efecto que escucha
+  `produccion_programada`, ignora cambios de borrador y de las líneas propias para no interrumpir; reload
+  debounce 800ms). Requiere correr **`migrations/realtime_programa.sql`** (suma la tabla a `supabase_realtime`).
+  La ventana de carrera del fork al entrar a una línea quedó **endurecida**: `programar` asegura el borrador
+  antes de agregar.
 - **F5** (botón Actualizar): `components/RefreshButton.tsx` arriba a la derecha; inserta en `refresh_log`
   (status 'pendiente') que el watcher (sync) levanta, y al completar recarga (`onComplete=cargar`). **Sin migración**
   (refresh_log ya existe en la base compartida).
@@ -202,8 +203,8 @@ Buena parte de la logica pesada (setups reales, enriquecimiento botella/formato/
 - **F1b** ✅ — lock por linea (`linea_edicion`, heartbeat 3min / TTL 10min) + Realtime + poll 30s + indicadores
   ("Editás vos" / "La edita Fulano" / 🔒 en la pestaña). `puedeEditar = isAdmin && !lockDeOtro(linea)`.
   **Pendiente del usuario**: activar Realtime de la tabla en Supabase → Database → Replication.
-- **F2** ✅ — borrador/oficial + botón "Plasmar Programa" (capability-flag por columna `estado`; `migrations/borrador.sql`).
-  Falta (follow-up): Realtime de `produccion_programada` para que el resto vea el plasmado al instante.
+- **F2** ✅ — borrador/oficial + botón "Plasmar Programa" (capability-flag por columna `estado`; `migrations/borrador.sql`)
+  + **Realtime del oficial** (`migrations/realtime_programa.sql`) para ver el plasmado al instante.
 - **F3** ✅ — setups reales (máximo de componentes + etiqueta) en `lib/setups.ts`, recomputados en la cadena.
   Falta: restricciones de formato por línea (el centinela 9999/`>=900` hoy se ignora).
 - **F4** ✅ (capacidad) — turnos + % paradas + **% de uso por línea/semana** (`migrations/capacidad_linea.sql`).
