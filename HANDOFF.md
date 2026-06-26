@@ -61,6 +61,10 @@ Next.js 16.2.6 (Turbopack) · React 19 · Tailwind 4 · `@supabase/supabase-js`.
 
 ## Estado actual — lo hecho (mas nuevo arriba)
 
+- **F1a** (acceso, parte 1): **AuthContext con roles** (port de ProgramacionCQ: `isAdmin = permisos['configuracion'].puede_ver`)
+  + **pantalla de seleccion de linea al entrar** (`SelectorLinea`) + **gating por rol**: VISITA solo lee (sin drag,
+  sin ✕ para quitar, sin editor de cajas), PROGRAMADOR edita. `linea` ahora es `Linea | null` (null = pantalla de
+  seleccion; boton ⟵ vuelve a elegir). Hoy `puedeEditar = isAdmin`. Falta **F1b**: lock por linea + heartbeat + Realtime.
 - **Lote 1b** (commit `5a3c231`): **cajas editable por bloque**. En el popover del bloque hay un editor
   (input + Ajustar + ↺). Visual: cantidad de sistema **tachada** + ajustada mas grande con **flecha ↑/↓**
   (ambar sube / verde baja), en el bloque y el popover. Al ajustar se **recalcula la cadena del dia**
@@ -125,8 +129,9 @@ Buena parte de la logica pesada (setups reales, enriquecimiento botella/formato/
 
 - **Lote 1a** ✅ — UX base (pantalla completa, filtro estado, click=info, quitar ✕+doble-click).
 - **Lote 1b** ✅ — cajas editable + merge.
-- **F1** (EN CURSO) — selector de linea al entrar + roles Admin/Visita + lock por linea (heartbeat 10min) +
-  Realtime del indicador "quien edita". (Decision UX: pantalla de seleccion de linea a pantalla completa.)
+- **F1a** ✅ — selector de linea al entrar (pantalla completa) + roles Admin/Visita (port de permisos) + read-only por rol.
+- **F1b** (sigue) — lock por linea (tabla `linea_edicion`, heartbeat 10min) + Realtime del indicador "quien edita".
+  `puedeEditar` hoy = `isAdmin`; pasara a `isAdmin && (lock libre o mio)`. Activar Realtime de `linea_edicion` en Supabase.
 - **F2** — borrador/oficial + boton "Plasmar Programa".
 - **F3** — enriquecimiento + setups reales (portar del optimizador).
 - **F4** — visual: gap de setup entre ordenes, % de uso por linea (paradas + turnos), vista semanal +
