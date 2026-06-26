@@ -43,6 +43,8 @@ interface Programada {
   cajas: number | null            // cantidad de SISTEMA (ope_ordenes) al programar
   cajas_ajustado: number | null   // ajuste manual; null = usar la de sistema
   fraccionado: string | null
+  sku?: string | null             // cod_item_largo (en memoria, NO persiste)
+  codEq?: string | null           // codigo de vino derivado (en memoria, para agrupar)
 }
 
 // Cajas efectivas: el ajuste manual si existe, si no la de sistema.
@@ -62,6 +64,54 @@ function recalcCadena(delDia: Programada[], lineaKey: string, fechaIso: string, 
     prevFin = fin
     return { ...p, hora_inicio: inicio.toISOString(), hora_fin: fin.toISOString(), duracion_min: dur, orden_en_dia: i + 1 }
   })
+}
+
+// Formato de duracion: 150 -> "2h 30m", 45 -> "45m".
+function fmtDur(min: number): string {
+  const m = Math.max(0, Math.round(min))
+  const h = Math.floor(m / 60), r = m % 60
+  return h > 0 ? `${h}h ${String(r).padStart(2, '0')}m` : `${r}m`
+}
+
+// Codigo de vino desde el insumo activo (ISVTPA1077-.. -> A1077). Para agrupar.
+function codEqDeInsumo(insumo: string | null | undefined): string | null {
+  if (!insumo) return null
+  const i = insumo.trim()
+  return i.startsWith('ISVTP') ? i.replace(/^ISVTP/, '').replace(/-.*$/, '').trim() : i
+}
+
+// Posicion (px) de un bloque en el timeline del dia.
+function posBloque(p: Programada): { top: number; h: number } {
+  const ini = new Date(p.hora_inicio)
+  const minM = ini.getHours() * 60 + ini.getMinutes()
+  const total = p.setup_min + p.duracion_min
+  const top = (minM / 1440) * DIA_H
+  const rawH = (total / 1440) * DIA_H
+  const h = Math.max(18, Math.min(rawH, DIA_H - top))
+  return { top, h }
+}
+
+// Color (hsl) determinista por codigo de vino, para el borde del grupo.
+function colorDeVino(key: string): string {
+  let hsh = 0
+  for (let i = 0; i < key.length; i++) hsh = (hsh * 31 + key.charCodeAt(i)) % 360
+  return `hsl(${hsh}, 65%, 42%)`
+}
+
+// Grupos de bloques consecutivos con el mismo vino (para encerrarlos con un borde).
+function gruposVino(bloques: Programada[]): { key: string; top: number; height: number; n: number }[] {
+  const sorted = [...bloques].sort((a, b) => a.orden_en_dia - b.orden_en_dia)
+  const out: { key: string; top: number; height: number; n: number }[] = []
+  let i = 0
+  while (i < sorted.length) {
+    const key = sorted[i].codEq ?? sorted[i].wo
+    let j = i
+    while (j + 1 < sorted.length && (sorted[j + 1].codEq ?? sorted[j + 1].wo) === key) j++
+    const a = posBloque(sorted[i]), b = posBloque(sorted[j])
+    out.push({ key: String(key), top: a.top, height: (b.top + b.h) - a.top, n: j - i + 1 })
+    i = j + 1
+  }
+  return out
 }
 
 // ── Página ───────────────────────────────────────────────────────────────────
@@ -137,11 +187,21 @@ export default function ProgramadorPage() {
     let merged = programadasData
     const progWos = [...new Set(programadasData.map(p => p.wo))]
     if (progWos.length) {
-      const { data: sysRows } = await supabase
-        .from('ope_ordenes').select('orden,cajas_jde').in('orden', progWos)
-      const sysMap = new Map((sysRows ?? []).map(r => {
+      const [sysRes, prodVinoRes] = await Promise.all([
+        supabase.from('ope_ordenes').select('orden,cajas_jde,cod_item_largo').in('orden', progWos),
+        supabase.from('producciones').select('orden,insumo').in('orden', progWos),
+      ])
+      const sysMap = new Map((sysRes.data ?? []).map(r => {
         const rr = r as { orden: unknown; cajas_jde: unknown }
         return [String(rr.orden), Number(rr.cajas_jde)]
+      }))
+      const skuMap = new Map((sysRes.data ?? []).map(r => {
+        const rr = r as { orden: unknown; cod_item_largo: unknown }
+        return [String(rr.orden), (rr.cod_item_largo as string | null) ?? null]
+      }))
+      const vinoMap = new Map((prodVinoRes.data ?? []).map(r => {
+        const rr = r as { orden: unknown; insumo: unknown }
+        return [String(rr.orden), codEqDeInsumo(rr.insumo as string | null)]
       }))
       const diasTocados = new Set<string>()
       merged = programadasData.map(p => {
@@ -171,6 +231,8 @@ export default function ProgramadorPage() {
           }
         }
       }
+      // Enriquecer (en memoria) con SKU + codigo de vino para pintar los bloques
+      merged = merged.map(p => ({ ...p, sku: skuMap.get(p.wo) ?? null, codEq: vinoMap.get(p.wo) ?? null }))
     }
 
     setProgramadas(merged)
@@ -413,6 +475,12 @@ export default function ProgramadorPage() {
                         style={{ top: (h / 24) * DIA_H }} />
                     ))}
 
+                    {/* Borde de grupo de vino (órdenes consecutivas del mismo vino) */}
+                    {gruposVino(bloques).filter(g => g.n >= 2).map((g, gi) => (
+                      <div key={`g${gi}`} className="absolute left-0 right-0 rounded-md pointer-events-none z-0"
+                        style={{ top: g.top - 2, height: g.height + 4, border: `2px solid ${colorDeVino(g.key)}` }} />
+                    ))}
+
                     {bloques.map(p => (
                       <Bloque key={p.id} p={p} puedeEditar={puedeEditar}
                         onInfo={e => setInfo({ id: p.id, x: e.clientX, y: e.clientY })}
@@ -449,14 +517,11 @@ function Bloque({ p, puedeEditar, onInfo, onQuitar }: {
   onInfo: (e: MouseEvent) => void
   onQuitar: () => void
 }) {
-  const ini = new Date(p.hora_inicio)
-  const minDesdeMedianoche = ini.getHours() * 60 + ini.getMinutes()
+  const { top, h } = posBloque(p)
   const totalMin = p.setup_min + p.duracion_min
-
-  const top = (minDesdeMedianoche / 1440) * DIA_H
-  const rawH = (totalMin / 1440) * DIA_H
-  const h = Math.max(18, Math.min(rawH, DIA_H - top))
-  const cruzaMedianoche = top + rawH > DIA_H
+  const bandH = p.setup_min > 0 && totalMin > 0
+    ? Math.max(9, Math.min(h * (p.setup_min / totalMin), h * 0.45))
+    : 0
 
   const adj   = p.cajas_ajustado != null
   const ef    = cajasEf(p)
@@ -464,23 +529,30 @@ function Bloque({ p, puedeEditar, onInfo, onQuitar }: {
   const arrow = adj ? (ef > sys ? '↑' : ef < sys ? '↓' : '') : ''
 
   return (
-    <div className="group absolute left-0.5 right-0.5" style={{ top, height: h }}>
+    <div className="group absolute left-0.5 right-0.5 z-10" style={{ top, height: h }}>
       <div
         onClick={onInfo}
-        className="w-full h-full rounded-md bg-red-800 hover:bg-red-700 text-white text-left px-1.5 py-1 overflow-hidden shadow-sm cursor-pointer"
+        className="w-full h-full rounded-md bg-red-800 hover:bg-red-700 text-white overflow-hidden shadow cursor-pointer border-2 border-red-950/70 flex flex-col"
       >
-        <div className="text-[10px] font-mono font-semibold leading-tight truncate">{p.wo}</div>
-        {h > 30 && (
-          <div className="text-[9px] opacity-80 leading-tight tabular-nums">
-            {fmtHora(p.hora_inicio)}{cruzaMedianoche ? ' ↓' : `–${fmtHora(p.hora_fin)}`}
+        {/* Banda de setup = tiempo entre órdenes (con F3 será el real por componente) */}
+        {bandH > 0 && (
+          <div
+            className="shrink-0 flex items-center justify-center text-[8px] font-semibold text-white/90"
+            style={{ height: bandH, backgroundImage: 'repeating-linear-gradient(45deg,#7f1d1d,#7f1d1d 4px,#9f1239 4px,#9f1239 8px)' }}
+            title={`Setup ${p.setup_min} min`}
+          >
+            {bandH > 11 ? `⚙ ${p.setup_min}m` : ''}
           </div>
         )}
-        {h > 44 && (
-          <div className="text-[9px] leading-tight truncate flex items-baseline gap-1">
-            {adj && <span className="opacity-50 line-through">{sys.toLocaleString('es-AR')}</span>}
-            <span className={adj ? 'font-semibold' : 'opacity-70'}>{arrow}{ef.toLocaleString('es-AR')} cj</span>
+        {/* Contenido: N° de orden grande + SKU + duración */}
+        <div className="flex-1 min-h-0 px-1.5 py-0.5 overflow-hidden leading-tight">
+          <div className="text-[13px] font-bold font-mono truncate">{p.wo}</div>
+          {p.sku && <div className="text-[9px] font-mono text-white/75 truncate">{p.sku}</div>}
+          <div className="text-[10px] text-white/90 tabular-nums truncate">
+            {fmtDur(p.duracion_min)}
+            {adj && <span className="ml-1 font-semibold">{arrow}{ef.toLocaleString('es-AR')}cj</span>}
           </div>
-        )}
+        </div>
       </div>
       {/* ✕ al pasar el mouse · doble-click para quitar (solo si puede editar) */}
       {puedeEditar && (
