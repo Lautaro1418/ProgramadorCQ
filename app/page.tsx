@@ -88,6 +88,9 @@ interface Programada {
   vinoCode?: string | null        // codigo de vino a mostrar (A2091) — en memoria
   esEstiba?: boolean              // insumo ISE = estiba — en memoria
   botella?: string | null         // codigo de botella (A04) — en memoria
+  cosecha?: string | number | null   // añada (ope_ordenes.cosecha) — en memoria
+  alcohol?: string | number | null   // alcohol (ope_ordenes.alcohol) — en memoria
+  estadoJde?: number | null          // estado JDE (ope_ordenes.estado) — en memoria
 }
 
 // Cajas efectivas: el ajuste manual si existe, si no la de sistema.
@@ -153,6 +156,24 @@ function botellaCode(ifr: string | null | undefined): string | null {
   return s.length >= 3 ? s.slice(-3) : s
 }
 
+// Estado JDE → etiqueta corta. "Hecha" = ya producida (>= 60).
+const ESTADOS_JDE: Record<number, string> = {
+  5: 'Creada', 10: 'Rev BOM', 40: 'Aprob', 41: 'Lote act', 45: 'En proceso',
+  60: 'Term parc', 90: 'Terminada', 98: 'Contab', 99: 'Cancel',
+}
+function estadoLabel(n: number | null | undefined): string {
+  if (n == null) return '—'
+  return ESTADOS_JDE[n] ?? String(n)
+}
+function esHecha(n: number | null | undefined): boolean {
+  return n != null && n >= 60
+}
+function fmtAlcohol(a: string | number | null | undefined): string {
+  if (a == null || a === '') return ''
+  const n = Number(a)
+  return Number.isFinite(n) ? `${n.toLocaleString('es-AR', { maximumFractionDigits: 1 })}%` : String(a)
+}
+
 // Color (hsl) determinista por codigo de vino, para el borde del grupo.
 function colorDeVino(key: string): string {
   let hsh = 0
@@ -200,19 +221,24 @@ export default function ProgramadorPage() {
     // F2: ¿existe la columna `estado`? Si no, la app se comporta como antes (todo oficial).
     const { error: estadoErr } = await supabase.from('produccion_programada').select('estado').limit(1)
     setDraftEnabled(!estadoErr)
-    const desde = toISODate(monday)
-    const hasta = toISODate(addDays(monday, 28))   // hasta 4 semanas (para el zoom 4-sem)
+    const hoy = new Date()
+    // Backlog: WOs con fe_solicitada desde HOY hasta +35 días
+    const bkDesde = toISODate(hoy)
+    const bkHasta = toISODate(addDays(hoy, 35))
+    // Ventana auxiliar (duración/botella): cubre la semana vista + el backlog
+    const desde = toISODate(new Date(Math.min(addDays(monday, -7).getTime(), hoy.getTime())))
+    const hasta = toISODate(new Date(Math.max(addDays(monday, 28).getTime(), addDays(hoy, 35).getTime())))
 
-    // Backlog: WOs de JDE aprobadas/en proceso, ventana de 2 semanas
+    // Backlog: WOs de JDE aprobadas/en proceso (estado>=40, !=99), de hoy a +35 días
     const woRows: WoBacklog[] = []
     for (let from = 0; ; from += 1000) {
       const { data } = await supabase
         .from('ope_ordenes')
-        .select('orden,descripcion,cajas_jde,cant_declarada,linea_fracc,fe_solicitada,estado')
+        .select('orden,descripcion,cajas_jde,cant_declarada,linea_fracc,fe_solicitada,estado,cosecha,alcohol')
         .gte('estado', 40)
         .neq('estado', 99)
-        .gte('fe_solicitada', desde)
-        .lt('fe_solicitada', hasta)
+        .gte('fe_solicitada', bkDesde)
+        .lte('fe_solicitada', bkHasta)
         .range(from, from + 999)
       if (!data || data.length === 0) break
       for (const r of data as Record<string, unknown>[]) {
@@ -259,7 +285,7 @@ export default function ProgramadorPage() {
     const progWos = [...new Set(programadasData.map(p => p.wo))]
     if (progWos.length) {
       const [sysRes, prodVinoRes, botRes] = await Promise.all([
-        supabase.from('ope_ordenes').select('orden,cajas_jde,cod_item_largo').in('orden', progWos),
+        supabase.from('ope_ordenes').select('orden,cajas_jde,cod_item_largo,cosecha,alcohol,estado').in('orden', progWos),
         supabase.from('producciones').select('orden,insumo').in('orden', progWos),
         supabase.from('producciones_insumos').select('orden,insumo').eq('familia', 'BOTELLA').in('orden', progWos),
       ])
@@ -270,6 +296,18 @@ export default function ProgramadorPage() {
       const skuMap = new Map((sysRes.data ?? []).map(r => {
         const rr = r as { orden: unknown; cod_item_largo: unknown }
         return [String(rr.orden), (rr.cod_item_largo as string | null) ?? null]
+      }))
+      const cosechaMap = new Map((sysRes.data ?? []).map(r => {
+        const rr = r as { orden: unknown; cosecha: unknown }
+        return [String(rr.orden), (rr.cosecha as string | number | null) ?? null]
+      }))
+      const alcoholMap = new Map((sysRes.data ?? []).map(r => {
+        const rr = r as { orden: unknown; alcohol: unknown }
+        return [String(rr.orden), (rr.alcohol as string | number | null) ?? null]
+      }))
+      const estadoMap = new Map((sysRes.data ?? []).map(r => {
+        const rr = r as { orden: unknown; estado: unknown }
+        return [String(rr.orden), rr.estado == null ? null : Number(rr.estado)]
       }))
       const vinoMap = new Map((prodVinoRes.data ?? []).map(r => {
         const rr = r as { orden: unknown; insumo: unknown }
@@ -317,6 +355,9 @@ export default function ProgramadorPage() {
           vinoCode: v?.code ?? null,
           esEstiba: v?.estiba ?? false,
           botella: botMap.get(p.wo) ?? null,
+          cosecha: cosechaMap.get(p.wo) ?? null,
+          alcohol: alcoholMap.get(p.wo) ?? null,
+          estadoJde: estadoMap.get(p.wo) ?? null,
         }
       })
     }
@@ -1002,6 +1043,11 @@ function OrderCard({ p, puedeEditar, variant, onInfo, onQuitar, onMoveStart, onM
     : variant === 'wide' ? Math.round(Math.max(60, p.duracion_min * PX_PER_MIN))
     : alturaBloque(p.duracion_min, false)
   const stripe = p.codEq ? colorDeVino(p.codEq) : '#9ca3af'
+  const hecha = esHecha(p.estadoJde)
+  // Las ya producidas (estado >= 60) se ven verdosas; el resto, gris.
+  const cardBg = hecha
+    ? 'bg-emerald-200 hover:bg-emerald-100 border-emerald-300 text-emerald-950'
+    : 'bg-stone-300 hover:bg-stone-200 border-stone-400/70 text-stone-800'
 
   return (
     <div
@@ -1016,7 +1062,7 @@ function OrderCard({ p, puedeEditar, variant, onInfo, onQuitar, onMoveStart, onM
       <div
         onClick={onInfo}
         style={{ borderLeftColor: stripe }}
-        className={`w-full h-full rounded-md bg-stone-300 hover:bg-stone-200 text-stone-800 overflow-hidden shadow-sm border border-stone-400/70 border-l-[7px] ${puedeEditar ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}`}
+        className={`w-full h-full rounded-md ${cardBg} overflow-hidden shadow-sm border border-l-[7px] ${puedeEditar ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}`}
       >
         {variant === 'compact' ? (
           <div className="px-1 h-full flex items-center">
@@ -1029,20 +1075,30 @@ function OrderCard({ p, puedeEditar, variant, onInfo, onQuitar, onMoveStart, onM
             <Campo label={p.esEstiba ? 'ESTIBA' : 'VINO'} value={p.vinoCode ?? '—'} mono />
             <Campo label="BOTELLA" value={p.botella ?? '—'} mono />
             <Campo label="TIEMPO" value={fmtDur(p.duracion_min)} />
-            <Campo label="CAJAS" value={cant} big className="ml-auto text-right" />
+            {p.cosecha != null && p.cosecha !== '' && <Campo label="AÑADA" value={String(p.cosecha)} />}
+            {fmtAlcohol(p.alcohol) && <Campo label="ALC" value={fmtAlcohol(p.alcohol)} />}
+            <div className="ml-auto flex items-center gap-x-5 text-right">
+              <Campo label="ESTADO" value={estadoLabel(p.estadoJde)} />
+              <Campo label="CAJAS" value={cant} big />
+            </div>
           </div>
         ) : (
           <div className="px-1.5 py-1 leading-tight">
             <div className="flex items-baseline justify-between gap-1">
               <span className="text-[13px] font-bold font-mono truncate">{p.wo}</span>
-              <span className="text-[11px] font-bold tabular-nums whitespace-nowrap">{cant}<span className="text-stone-500 font-normal"> cj</span></span>
+              <span className="text-[11px] font-bold tabular-nums whitespace-nowrap flex items-baseline gap-1">
+                <span className="text-[8px] font-medium uppercase text-stone-500">{estadoLabel(p.estadoJde)}</span>
+                {cant}<span className="text-stone-500 font-normal">cj</span>
+              </span>
             </div>
             {p.sku && <div className="text-[10px] font-mono text-stone-500 truncate">{p.sku}</div>}
             <div className="flex items-center justify-between gap-1 mt-0.5">
               <span className="text-[12px] font-semibold truncate">{p.vinoCode ?? '—'}{p.esEstiba ? ' est' : ''}</span>
               <span className="text-[11px] font-medium text-stone-600 whitespace-nowrap">{p.botella ?? '—'}</span>
             </div>
-            <div className="text-[9px] text-stone-500 tabular-nums">{fmtDur(p.duracion_min)}</div>
+            <div className="text-[9px] text-stone-500 tabular-nums truncate">
+              {fmtDur(p.duracion_min)}{p.cosecha != null && p.cosecha !== '' ? ` · ${p.cosecha}` : ''}{fmtAlcohol(p.alcohol) ? ` · ${fmtAlcohol(p.alcohol)}` : ''}
+            </div>
           </div>
         )}
       </div>
@@ -1127,6 +1183,9 @@ function InfoPopover({ p, x, y, puedeEditar, onClose, onAjustar }: {
           <Row k="SKU" v={p.sku ?? '—'} />
           <Row k={p.esEstiba ? 'Estiba' : 'Vino'} v={p.vinoCode ?? '—'} />
           <Row k="Botella" v={p.botella ?? '—'} />
+          <Row k="Añada" v={p.cosecha != null && p.cosecha !== '' ? String(p.cosecha) : '—'} />
+          <Row k="Alcohol" v={fmtAlcohol(p.alcohol) || '—'} />
+          <Row k="Estado JDE" v={estadoLabel(p.estadoJde)} />
           <Row k="Fracc." v={p.fraccionado ?? '—'} />
         </dl>
 
