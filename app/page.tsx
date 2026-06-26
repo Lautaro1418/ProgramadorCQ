@@ -126,6 +126,7 @@ export default function ProgramadorPage() {
   const [search, setSearch]   = useState('')
   const [dragWo, setDragWo]   = useState<string | null>(null)
   const [info, setInfo]       = useState<{ id: number; x: number; y: number } | null>(null)
+  const [dragBlock, setDragBlock] = useState<number | null>(null)
 
   const dias = useMemo(() => semanaDesde(monday), [monday])
 
@@ -313,6 +314,46 @@ export default function ProgramadorPage() {
     }
   }
 
+  // ── Mover un bloque (arrastrar a otro día o reordenar dentro del día) ─────────
+  async function moverBloque(blockId: number, targetFecha: string, beforeId: number | null) {
+    if (!linea || !puedeEditar || beforeId === blockId) return
+    const moved = programadas.find(p => p.id === blockId)
+    if (!moved) return
+    const oldFecha = moved.fecha
+
+    let arr = programadas.map(p => p.id === blockId ? { ...p, fecha: targetFecha } : { ...p })
+    const movedRow = arr.find(p => p.id === blockId)!
+
+    // Día destino: insertar antes de beforeId (o al final)
+    const destino = arr.filter(p => p.linea === linea && p.fecha === targetFecha && p.id !== blockId)
+      .sort((a, b) => a.orden_en_dia - b.orden_en_dia)
+    const idx = beforeId == null ? -1 : destino.findIndex(p => p.id === beforeId)
+    const ordenDestino = idx < 0 ? [...destino, movedRow] : [...destino.slice(0, idx), movedRow, ...destino.slice(idx)]
+    ordenDestino.forEach((p, i) => { p.orden_en_dia = i + 1 })
+
+    const dias = new Set([targetFecha])
+    if (oldFecha !== targetFecha) {
+      arr.filter(p => p.linea === linea && p.fecha === oldFecha)
+        .sort((a, b) => a.orden_en_dia - b.orden_en_dia)
+        .forEach((p, i) => { p.orden_en_dia = i + 1 })
+      dias.add(oldFecha)
+    }
+
+    for (const fe of dias) {
+      const recalced = recalcCadena(arr.filter(p => p.linea === linea && p.fecha === fe), linea, fe, maps)
+      const byId = new Map(recalced.map(r => [r.id, r]))
+      arr = arr.map(p => byId.get(p.id) ?? p)
+    }
+    setProgramadas(arr)
+
+    for (const p of arr.filter(p => p.linea === linea && dias.has(p.fecha))) {
+      await supabase.from('produccion_programada').update({
+        fecha: p.fecha, orden_en_dia: p.orden_en_dia,
+        hora_inicio: p.hora_inicio, hora_fin: p.hora_fin, duracion_min: p.duracion_min,
+      }).eq('id', p.id)
+    }
+  }
+
   // ── Backlog filtrado ────────────────────────────────────────────────────────
   const q = search.trim().toLowerCase()
   const backlogVisible = useMemo(() => backlog.filter(w =>
@@ -459,13 +500,13 @@ export default function ProgramadorPage() {
                     onDragOver={e => e.preventDefault()}
                     onDrop={() => {
                       if (puedeEditar) {
-                        const wo = backlog.find(w => w.orden === dragWo)
-                        if (wo) programar(wo, d.iso)
+                        if (dragWo) { const wo = backlog.find(w => w.orden === dragWo); if (wo) programar(wo, d.iso) }
+                        else if (dragBlock != null) { moverBloque(dragBlock, d.iso, null) }
                       }
-                      setDragWo(null)
+                      setDragWo(null); setDragBlock(null)
                     }}
                     className={`relative mx-0.5 rounded-md border border-dashed transition-colors ${
-                      dragWo ? 'border-red-300 bg-red-50/40' : 'border-stone-200 bg-stone-50/40'
+                      (dragWo || dragBlock != null) ? 'border-red-300 bg-red-50/40' : 'border-stone-200 bg-stone-50/40'
                     }`}
                     style={{ height: DIA_H }}
                   >
@@ -484,7 +525,10 @@ export default function ProgramadorPage() {
                     {bloques.map(p => (
                       <Bloque key={p.id} p={p} puedeEditar={puedeEditar}
                         onInfo={e => setInfo({ id: p.id, x: e.clientX, y: e.clientY })}
-                        onQuitar={() => quitar(p)} />
+                        onQuitar={() => quitar(p)}
+                        onMoveStart={() => { setDragBlock(p.id); setDragWo(null) }}
+                        onMoveEnd={() => { setDragBlock(null); setDragWo(null) }}
+                        onMoveDropHere={() => { if (dragBlock != null && dragBlock !== p.id) moverBloque(dragBlock, p.fecha, p.id); setDragBlock(null); setDragWo(null) }} />
                     ))}
                   </div>
                 </div>
@@ -511,11 +555,14 @@ export default function ProgramadorPage() {
 }
 
 // ── Bloque del Gantt ─────────────────────────────────────────────────────────
-function Bloque({ p, puedeEditar, onInfo, onQuitar }: {
+function Bloque({ p, puedeEditar, onInfo, onQuitar, onMoveStart, onMoveEnd, onMoveDropHere }: {
   p: Programada
   puedeEditar: boolean
   onInfo: (e: MouseEvent) => void
   onQuitar: () => void
+  onMoveStart: () => void
+  onMoveEnd: () => void
+  onMoveDropHere: () => void
 }) {
   const { top, h } = posBloque(p)
   const totalMin = p.setup_min + p.duracion_min
@@ -529,10 +576,18 @@ function Bloque({ p, puedeEditar, onInfo, onQuitar }: {
   const arrow = adj ? (ef > sys ? '↑' : ef < sys ? '↓' : '') : ''
 
   return (
-    <div className="group absolute left-0.5 right-0.5 z-10" style={{ top, height: h }}>
+    <div
+      className="group absolute left-0.5 right-0.5 z-10"
+      style={{ top, height: h }}
+      draggable={puedeEditar}
+      onDragStart={e => { if (!puedeEditar) { e.preventDefault(); return } e.stopPropagation(); onMoveStart() }}
+      onDragEnd={onMoveEnd}
+      onDragOver={e => { if (puedeEditar) e.preventDefault() }}
+      onDrop={e => { e.preventDefault(); e.stopPropagation(); onMoveDropHere() }}
+    >
       <div
         onClick={onInfo}
-        className="w-full h-full rounded-md bg-red-800 hover:bg-red-700 text-white overflow-hidden shadow cursor-pointer border-2 border-red-950/70 flex flex-col"
+        className={`w-full h-full rounded-md bg-red-800 hover:bg-red-700 text-white overflow-hidden shadow border-2 border-red-950/70 flex flex-col ${puedeEditar ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}`}
       >
         {/* Banda de setup = tiempo entre órdenes (con F3 será el real por componente) */}
         {bandH > 0 && (
