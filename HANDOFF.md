@@ -75,6 +75,14 @@ hasta que plasmás). Si algo del borrador se ve raro al entrar muy rápido a una
 
 ## Estado actual — lo hecho (mas nuevo arriba)
 
+- **UX grilla** (2026-06-26): (1) el **setup pasó al hueco entre órdenes** — la producción arranca después del
+  setup, que queda como un espacio real con un **chip ámbar** "⚙ 45m · formato" (`SetupGap`); el bloque quedó
+  limpio (N°/SKU/duración, **adaptativo al alto**) y se subió `DIA_H` 480→560. `recalcCadena` ahora pone
+  `hora_inicio` = inicio de producción y `posBloque` calcula alto solo con la producción. (2) **Zoom Día / Semana
+  / 4 semanas** (segmentado en la toolbar): `← →` navegan según el zoom, "Hoy" resetea, y **click en el encabezado
+  de un día** hace zoom-in a ese día. `dias` se arma por zoom (1/7/28); la **capacidad/% uso sigue siendo siempre
+  semanal** (`semanaDias` de `monday`, desacoplado del zoom). El backlog/atributos cargan 4 semanas. En 4-sem las
+  columnas son angostas y se ocultan los chips de setup (es vista de densidad; click en el día para el detalle).
 - **F2** (borrador / Plasmar): cada línea tiene un **programa oficial** (lo ven todos) y, para el programador
   que la edita, un **borrador privado**. Al tomar el lock se **forkea** el oficial→borrador (`ensureDraft`);
   los cambios (drag/mover/ajustar/quitar) van al borrador y **el resto sigue viendo el oficial**. Botón

@@ -155,6 +155,8 @@ export default function ProgramadorPage() {
   const { perfil, isAdmin } = useAuth()
   const [linea, setLinea]   = useState<Linea | null>(null)
   const [monday, setMonday] = useState(() => mondayOf(new Date()))
+  const [zoom, setZoom]     = useState<'dia' | 'semana' | 'mes'>('semana')
+  const [anchor, setAnchor] = useState<string>(() => toISODate(new Date()))
   const [backlog, setBacklog]       = useState<WoBacklog[]>([])
   const [programadas, setProgramadas] = useState<Programada[]>([])
   const [maps, setMaps]     = useState<DuracionMaps>(() => buildDuracionMaps([], []))
@@ -170,7 +172,17 @@ export default function ProgramadorPage() {
   const [draftEnabled, setDraftEnabled] = useState(false)   // F2: existe la columna `estado`
   const forkedRef = useRef<Set<string>>(new Set())
 
-  const dias = useMemo(() => semanaDesde(monday), [monday])
+  // Días visibles según el zoom: 1 día / 7 (semana) / 28 (4 semanas)
+  const dias = useMemo(() => {
+    if (zoom === 'dia') {
+      const f = new Date(anchor + 'T00:00:00')
+      return semanaDesde(mondayOf(f)).filter(d => d.iso === anchor)
+    }
+    if (zoom === 'mes') return [0, 7, 14, 21].flatMap(off => semanaDesde(addDays(monday, off)))
+    return semanaDesde(monday)
+  }, [zoom, anchor, monday])
+  // La capacidad/% uso es SIEMPRE semanal (semana de `monday`), independiente del zoom
+  const semanaDias = useMemo(() => semanaDesde(monday).map(d => d.iso), [monday])
 
   // ── Carga de datos ─────────────────────────────────────────────────────────
   const cargar = useCallback(async () => {
@@ -179,7 +191,7 @@ export default function ProgramadorPage() {
     const { error: estadoErr } = await supabase.from('produccion_programada').select('estado').limit(1)
     setDraftEnabled(!estadoErr)
     const desde = toISODate(monday)
-    const hasta = toISODate(addDays(monday, 14))   // semana actual + siguiente
+    const hasta = toISODate(addDays(monday, 28))   // hasta 4 semanas (para el zoom 4-sem)
 
     // Backlog: WOs de JDE aprobadas/en proceso, ventana de 2 semanas
     const woRows: WoBacklog[] = []
@@ -639,11 +651,30 @@ export default function ProgramadorPage() {
   const horasDisp   = linea ? horasSemana(linea, turnoActual) : 0
   const capMin = horasDisp * 60 * Math.max(0, 1 - (paradasOp + paradasExt) / 100)
   const minProgSemana = programadasVisible
-    .filter(p => p.linea === linea && dias.some(d => d.iso === p.fecha))
+    .filter(p => p.linea === linea && semanaDias.includes(p.fecha))
     .reduce((s, p) => s + p.setup_min + p.duracion_min, 0)
   const pctUso = capMin > 0 ? (minProgSemana / capMin) * 100 : 0
   const usoColor = pctUso >= 100 ? 'text-red-700' : pctUso >= 85 ? 'text-amber-700' : 'text-emerald-700'
   const barColor = pctUso >= 100 ? 'bg-red-600' : pctUso >= 85 ? 'bg-amber-500' : 'bg-emerald-500'
+
+  // Navegación / zoom
+  const navPrev = () => {
+    if (zoom === 'dia') { const a = toISODate(addDays(new Date(anchor + 'T00:00:00'), -1)); setAnchor(a); setMonday(mondayOf(new Date(a + 'T00:00:00'))) }
+    else setMonday(m => addDays(m, zoom === 'mes' ? -28 : -7))
+  }
+  const navNext = () => {
+    if (zoom === 'dia') { const a = toISODate(addDays(new Date(anchor + 'T00:00:00'), 1)); setAnchor(a); setMonday(mondayOf(new Date(a + 'T00:00:00'))) }
+    else setMonday(m => addDays(m, zoom === 'mes' ? 28 : 7))
+  }
+  const irHoy = () => { setAnchor(toISODate(new Date())); setMonday(mondayOf(new Date())) }
+  const verDia = (iso: string) => { setAnchor(iso); setMonday(mondayOf(new Date(iso + 'T00:00:00'))); setZoom('dia') }
+  const navLabel = zoom === 'dia'
+    ? `${dias[0]?.dow ?? ''} ${dias[0]?.label ?? ''}`
+    : zoom === 'mes'
+      ? `Sem ${getISOWeek(monday)}–${getISOWeek(addDays(monday, 21))} · ${toISODate(monday).slice(5)}→${toISODate(addDays(monday, 27)).slice(5)}`
+      : `Semana ${getISOWeek(monday)} · ${toISODate(monday).slice(5)}→${toISODate(addDays(monday, 6)).slice(5)}`
+  const colMin  = zoom === 'dia' ? 360 : zoom === 'mes' ? 46 : 92
+  const gridMin = 40 + dias.length * colMin
 
   // Pantalla de selección de línea al entrar
   if (linea === null) {
@@ -689,16 +720,26 @@ export default function ProgramadorPage() {
           })}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <RefreshButton onComplete={cargar} />
-          <button onClick={() => setMonday(m => addDays(m, -7))}
-            className="px-2.5 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-600 text-sm">←</button>
-          <div className="text-sm font-medium text-stone-700 min-w-[150px] text-center">
-            Semana {getISOWeek(monday)} · {toISODate(monday).slice(5)} → {toISODate(addDays(monday, 6)).slice(5)}
+          {/* Zoom: Día / Semana / 4 sem */}
+          <div className="flex rounded-lg bg-stone-100 p-0.5">
+            {([['dia', 'Día'], ['semana', 'Semana'], ['mes', '4 sem']] as const).map(([z, lbl]) => (
+              <button key={z}
+                onClick={() => { if (z === 'dia') setMonday(mondayOf(new Date(anchor + 'T00:00:00'))); setZoom(z) }}
+                className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${
+                  zoom === z ? 'bg-white text-red-900 shadow-sm' : 'text-stone-500 hover:text-stone-700'
+                }`}>
+                {lbl}
+              </button>
+            ))}
           </div>
-          <button onClick={() => setMonday(m => addDays(m, 7))}
+          <button onClick={navPrev}
+            className="px-2.5 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-600 text-sm">←</button>
+          <div className="text-sm font-medium text-stone-700 min-w-[160px] text-center">{navLabel}</div>
+          <button onClick={navNext}
             className="px-2.5 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-600 text-sm">→</button>
-          <button onClick={() => setMonday(mondayOf(new Date()))}
+          <button onClick={irHoy}
             className="px-3 py-1.5 rounded-lg bg-stone-800 text-white text-sm font-medium">Hoy</button>
         </div>
       </div>
@@ -808,7 +849,7 @@ export default function ProgramadorPage() {
 
         {/* ── Grilla Gantt semanal ── */}
         <div className="bg-white border border-stone-200 rounded-xl p-3 overflow-x-auto">
-          <div className="flex" style={{ minWidth: 760 }}>
+          <div className="flex" style={{ minWidth: gridMin }}>
             {/* Eje de horas */}
             <div className="shrink-0 w-9 pt-7">
               <div className="relative" style={{ height: DIA_H }}>
@@ -828,12 +869,15 @@ export default function ProgramadorPage() {
                 .sort((a, b) => a.orden_en_dia - b.orden_en_dia)
               const isToday = d.iso === toISODate(new Date())
               return (
-                <div key={d.iso} className="flex-1 min-w-[92px] border-l border-stone-100">
-                  {/* Encabezado del día */}
-                  <div className={`text-center pb-1 mb-0.5 ${isToday ? 'text-red-800' : 'text-stone-600'}`}>
+                <div key={d.iso} className="flex-1 border-l border-stone-100" style={{ minWidth: colMin }}>
+                  {/* Encabezado del día (click = zoom a ese día) */}
+                  <button
+                    onClick={() => (zoom === 'dia' ? setZoom('semana') : verDia(d.iso))}
+                    title={zoom === 'dia' ? 'Volver a la semana' : 'Ver este día en detalle'}
+                    className={`block w-full text-center pb-1 mb-0.5 rounded hover:bg-stone-100 ${isToday ? 'text-red-800' : 'text-stone-600'}`}>
                     <div className="text-[11px] font-semibold">{d.dow}</div>
                     <div className="text-[10px] tabular-nums">{d.label}</div>
-                  </div>
+                  </button>
 
                   {/* Timeline drop-zone */}
                   <div
@@ -862,8 +906,8 @@ export default function ProgramadorPage() {
                         style={{ top: g.top - 2, height: g.height + 4, border: `2px solid ${colorDeVino(g.key)}` }} />
                     ))}
 
-                    {/* Setup en el HUECO entre órdenes (chip) */}
-                    {bloques.map((p, i) => {
+                    {/* Setup en el HUECO entre órdenes (chip) — se oculta en 4 semanas por falta de ancho */}
+                    {zoom !== 'mes' && bloques.map((p, i) => {
                       if (i === 0 || p.setup_min <= 0) return null
                       const prev = bloques[i - 1]
                       const pf = new Date(prev.hora_fin)
