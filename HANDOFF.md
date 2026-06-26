@@ -59,6 +59,21 @@ Next.js 16.2.6 (Turbopack) · React 19 · Tailwind 4 · `@supabase/supabase-js`.
 
 ---
 
+## Acciones manuales pendientes (las corre Lautaro en Supabase)
+
+**1) Correr en Supabase → SQL Editor** (independientes entre sí):
+- `migrations/capacidad_linea.sql` — habilita el panel de capacidad / turnos / % de uso (F4).
+- `migrations/borrador.sql` — habilita el borrador privado + botón "Plasmar Programa" (F2).
+  **Hasta correrla, la app funciona EXACTAMENTE como antes** (todos editan el oficial directo, sin borrador).
+- `migrations/linea_edicion.sql` — solo si todavía no se corrió (lock por línea, F1b).
+
+**2) Supabase → Database → Replication**, activar Realtime de:
+- `linea_edicion` — para que el indicador "quién edita" sea instantáneo (sin esto anda igual, por poll de 30s).
+
+**3) Probar** (idealmente con 2 usuarios admin): entrar a la misma línea (el 2º ve 🔒 + "la edita Fulano"),
+tocar turno/paradas y ver el % de uso, y el flujo **borrador → "Plasmar Programa"** (el resto ve el oficial
+hasta que plasmás). Si algo del borrador se ve raro al entrar muy rápido a una línea, "Descartar" lo resetea.
+
 ## Estado actual — lo hecho (mas nuevo arriba)
 
 - **F2** (borrador / Plasmar): cada línea tiene un **programa oficial** (lo ven todos) y, para el programador
