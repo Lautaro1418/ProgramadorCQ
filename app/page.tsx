@@ -4,9 +4,10 @@ import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/contexts/AuthContext'
 import { mondayOf, addDays, toISODate, getISOWeek, semanaDesde, fmtHora } from '@/lib/fechas'
 import {
-  buildDuracionMaps, minutosProduccion, minutosSetup,
+  buildDuracionMaps, minutosProduccion,
   type DuracionMaps, type VelocidadRow, type InsumoBotellaRow,
 } from '@/lib/duracion'
+import { buildSetupMaps, emptySetupMaps, setupEntre, type SetupMaps } from '@/lib/setups'
 
 // ── Constantes ───────────────────────────────────────────────────────────────
 const LINEAS = ['L1', 'L2', 'L0', 'TM'] as const
@@ -50,6 +51,7 @@ interface Programada {
   fraccionado: string | null
   sku?: string | null             // cod_item_largo (en memoria, NO persiste)
   codEq?: string | null           // codigo de vino derivado (en memoria, para agrupar)
+  setupLabel?: string             // componente que manda en el setup (en memoria)
 }
 
 // Cajas efectivas: el ajuste manual si existe, si no la de sistema.
@@ -58,16 +60,18 @@ function cajasEf(p: Programada): number {
 }
 
 // Recalcula la cadena de un día/línea: cada bloque arranca donde terminó el anterior,
-// recalculando la duración con las cajas efectivas. Devuelve los bloques actualizados.
-function recalcCadena(delDia: Programada[], lineaKey: string, fechaIso: string, m: DuracionMaps): Programada[] {
+// recomputando el setup real (según la orden previa) y la duración con las cajas efectivas.
+function recalcCadena(delDia: Programada[], lineaKey: string, fechaIso: string, m: DuracionMaps, sm: SetupMaps): Programada[] {
   const sorted = [...delDia].sort((a, b) => a.orden_en_dia - b.orden_en_dia)
   let prevFin: Date | null = null
+  let prevWo: string | null = null
   return sorted.map((p, i) => {
     const inicio = prevFin ?? new Date(`${fechaIso}T${String(HORA_INICIO_DEFAULT).padStart(2, '0')}:00:00`)
+    const { min: setupMin, label } = setupEntre(prevWo, p.wo, lineaKey, sm)
     const dur = minutosProduccion(cajasEf(p), lineaKey, p.wo, m)
-    const fin = new Date(inicio.getTime() + (p.setup_min + dur) * 60000)
-    prevFin = fin
-    return { ...p, hora_inicio: inicio.toISOString(), hora_fin: fin.toISOString(), duracion_min: dur, orden_en_dia: i + 1 }
+    const fin = new Date(inicio.getTime() + (setupMin + dur) * 60000)
+    prevFin = fin; prevWo = p.wo
+    return { ...p, hora_inicio: inicio.toISOString(), hora_fin: fin.toISOString(), duracion_min: dur, setup_min: setupMin, setupLabel: label, orden_en_dia: i + 1 }
   })
 }
 
@@ -127,6 +131,7 @@ export default function ProgramadorPage() {
   const [backlog, setBacklog]       = useState<WoBacklog[]>([])
   const [programadas, setProgramadas] = useState<Programada[]>([])
   const [maps, setMaps]     = useState<DuracionMaps>(() => buildDuracionMaps([], []))
+  const [setupMaps, setSetupMaps] = useState<SetupMaps>(() => emptySetupMaps())
   const [loading, setLoading] = useState(true)
   const [search, setSearch]   = useState('')
   const [dragWo, setDragWo]   = useState<string | null>(null)
@@ -190,6 +195,10 @@ export default function ProgramadorPage() {
       (insRes.data ?? []) as InsumoBotellaRow[],
     )
 
+    // Setups reales (F3): tablas setup_* + atributos por orden (backlog ∪ programadas)
+    const ordenesAttrs = [...new Set([...woRows.map(w => w.orden), ...programadasData.map(p => p.wo)])]
+    const setupM = await buildSetupMaps(ordenesAttrs)
+
     // Merge: si el SISTEMA (ope_ordenes.cajas_jde) cambió la cantidad de una WO ya
     // programada, se descarta el ajuste manual y se adopta la nueva de sistema.
     let merged = programadasData
@@ -229,12 +238,12 @@ export default function ProgramadorPage() {
         }
         for (const key of diasTocados) {
           const [ln, fe] = key.split('|')
-          const recalced = recalcCadena(merged.filter(x => x.linea === ln && x.fecha === fe), ln, fe, m)
+          const recalced = recalcCadena(merged.filter(x => x.linea === ln && x.fecha === fe), ln, fe, m, setupM)
           const byId = new Map(recalced.map(r => [r.id, r]))
           merged = merged.map(x => byId.get(x.id) ?? x)
           for (const rc of recalced) {
             await supabase.from('produccion_programada').update({
-              hora_inicio: rc.hora_inicio, hora_fin: rc.hora_fin, duracion_min: rc.duracion_min, orden_en_dia: rc.orden_en_dia,
+              hora_inicio: rc.hora_inicio, hora_fin: rc.hora_fin, duracion_min: rc.duracion_min, setup_min: rc.setup_min, orden_en_dia: rc.orden_en_dia,
             }).eq('id', rc.id)
           }
         }
@@ -243,9 +252,21 @@ export default function ProgramadorPage() {
       merged = merged.map(p => ({ ...p, sku: skuMap.get(p.wo) ?? null, codEq: vinoMap.get(p.wo) ?? null }))
     }
 
-    setProgramadas(merged)
+    // Recalcular el timeline en memoria con setups reales (corrige el setup fijo viejo).
+    // No se persiste acá: cada edición (programar/mover/ajustar) ya persiste su día.
+    let finalProg = merged
+    const dayKeys = [...new Set(merged.map(p => `${p.linea}|${p.fecha}`))]
+    for (const key of dayKeys) {
+      const [ln, fe] = key.split('|')
+      const rc = recalcCadena(merged.filter(p => p.linea === ln && p.fecha === fe), ln, fe, m, setupM)
+      const byId = new Map(rc.map(r => [r.id, r]))
+      finalProg = finalProg.map(p => byId.get(p.id) ?? p)
+    }
+
+    setProgramadas(finalProg)
     setBacklog(woRows.filter(w => !yaProg.has(w.orden)))
     setMaps(m)
+    setSetupMaps(setupM)
     setLoading(false)
   }, [monday])
 
@@ -336,7 +357,7 @@ export default function ProgramadorPage() {
       ? new Date(ultimo.hora_fin)
       : new Date(`${fechaIso}T${String(HORA_INICIO_DEFAULT).padStart(2, '0')}:00:00`)
 
-    const setupMin = minutosSetup(ultimo?.wo ?? null, wo.orden, linea)
+    const { min: setupMin, label: setupLabel } = setupEntre(ultimo?.wo ?? null, wo.orden, linea, setupMaps)
     const durMin   = minutosProduccion(wo.cajas, linea, wo.orden, maps)
     const totalMin = setupMin + durMin
 
@@ -365,7 +386,7 @@ export default function ProgramadorPage() {
       .single()
 
     if (error) { alert('Error al programar: ' + error.message); return }
-    setProgramadas(prev => [...prev, data as Programada])
+    setProgramadas(prev => [...prev, { ...(data as Programada), setupLabel }])
     setBacklog(prev => prev.filter(w => w.orden !== wo.orden))
   }
 
@@ -382,13 +403,13 @@ export default function ProgramadorPage() {
     const sys = p.cajas ?? 0
     const ajustado = (nuevo == null || nuevo <= 0 || nuevo === sys) ? null : Math.round(nuevo)
     const base = programadas.map(x => x.id === p.id ? { ...x, cajas_ajustado: ajustado } : x)
-    const recalced = recalcCadena(base.filter(x => x.linea === p.linea && x.fecha === p.fecha), p.linea, p.fecha, maps)
+    const recalced = recalcCadena(base.filter(x => x.linea === p.linea && x.fecha === p.fecha), p.linea, p.fecha, maps, setupMaps)
     const byId = new Map(recalced.map(r => [r.id, r]))
     setProgramadas(base.map(x => byId.get(x.id) ?? x))
     await supabase.from('produccion_programada').update({ cajas_ajustado: ajustado }).eq('id', p.id)
     for (const rc of recalced) {
       await supabase.from('produccion_programada').update({
-        hora_inicio: rc.hora_inicio, hora_fin: rc.hora_fin, duracion_min: rc.duracion_min, orden_en_dia: rc.orden_en_dia,
+        hora_inicio: rc.hora_inicio, hora_fin: rc.hora_fin, duracion_min: rc.duracion_min, setup_min: rc.setup_min, orden_en_dia: rc.orden_en_dia,
       }).eq('id', rc.id)
     }
   }
@@ -419,7 +440,7 @@ export default function ProgramadorPage() {
     }
 
     for (const fe of dias) {
-      const recalced = recalcCadena(arr.filter(p => p.linea === linea && p.fecha === fe), linea, fe, maps)
+      const recalced = recalcCadena(arr.filter(p => p.linea === linea && p.fecha === fe), linea, fe, maps, setupMaps)
       const byId = new Map(recalced.map(r => [r.id, r]))
       arr = arr.map(p => byId.get(p.id) ?? p)
     }
@@ -427,7 +448,7 @@ export default function ProgramadorPage() {
 
     for (const p of arr.filter(p => p.linea === linea && dias.has(p.fecha))) {
       await supabase.from('produccion_programada').update({
-        fecha: p.fecha, orden_en_dia: p.orden_en_dia,
+        fecha: p.fecha, orden_en_dia: p.orden_en_dia, setup_min: p.setup_min,
         hora_inicio: p.hora_inicio, hora_fin: p.hora_fin, duracion_min: p.duracion_min,
       }).eq('id', p.id)
     }
@@ -692,14 +713,14 @@ function Bloque({ p, puedeEditar, onInfo, onQuitar, onMoveStart, onMoveEnd, onMo
         onClick={onInfo}
         className={`w-full h-full rounded-md bg-red-800 hover:bg-red-700 text-white overflow-hidden shadow border-2 border-red-950/70 flex flex-col ${puedeEditar ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}`}
       >
-        {/* Banda de setup = tiempo entre órdenes (con F3 será el real por componente) */}
+        {/* Banda de setup = cambio entre órdenes (máximo de los componentes, con la etiqueta del que manda) */}
         {bandH > 0 && (
           <div
-            className="shrink-0 flex items-center justify-center text-[8px] font-semibold text-white/90"
+            className="shrink-0 flex items-center justify-center gap-0.5 px-0.5 text-[8px] font-semibold text-white/90 text-center leading-none"
             style={{ height: bandH, backgroundImage: 'repeating-linear-gradient(45deg,#7f1d1d,#7f1d1d 4px,#9f1239 4px,#9f1239 8px)' }}
-            title={`Setup ${p.setup_min} min`}
+            title={`Setup ${p.setup_min} min${p.setupLabel ? ` · ${p.setupLabel}` : ''}`}
           >
-            {bandH > 11 ? `⚙ ${p.setup_min}m` : ''}
+            {bandH > 11 ? `⚙ ${p.setup_min}m${p.setupLabel ? ` · ${p.setupLabel.replace('cambio de ', '')}` : ''}` : ''}
           </div>
         )}
         {/* Contenido: N° de orden grande + SKU + duración */}
@@ -759,7 +780,7 @@ function InfoPopover({ p, x, y, puedeEditar, onClose, onAjustar }: {
           <Row k="Horario" v={`${fmtHora(p.hora_inicio)}–${fmtHora(p.hora_fin)}`} />
           <Row k="Total" v={`${totalMin} min`} />
           <Row k="Producción" v={`${p.duracion_min} min`} />
-          <Row k="Setup" v={`${p.setup_min} min`} />
+          <Row k="Setup" v={p.setup_min > 0 ? `${p.setup_min} min${p.setupLabel ? ` · ${p.setupLabel}` : ''}` : '—'} />
           <Row k="Fracc." v={p.fraccionado ?? '—'} />
         </dl>
 
