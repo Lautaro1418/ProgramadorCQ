@@ -1,5 +1,5 @@
 'use client'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type MouseEvent } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/contexts/AuthContext'
 import { mondayOf, addDays, toISODate, getISOWeek, semanaDesde, fmtHora } from '@/lib/fechas'
@@ -12,7 +12,8 @@ import {
 const LINEAS = ['L1', 'L2', 'L0', 'TM'] as const
 type Linea = (typeof LINEAS)[number]
 
-const ESTADOS_BACKLOG = [40, 41, 45]   // aprobada / lote activo / en proceso
+// Backlog: ordenes con estado >= 40 (40/41 listas · 45 en proceso · 60 c/control pendiente · 98 OK),
+// excepto 99 (canceladas). Las < 40 no se muestran.
 
 // Alto del timeline de un día (24h). 20px por hora.
 const DIA_H = 480
@@ -54,6 +55,7 @@ export default function ProgramadorPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch]   = useState('')
   const [dragWo, setDragWo]   = useState<string | null>(null)
+  const [info, setInfo]       = useState<{ p: Programada; x: number; y: number } | null>(null)
 
   const dias = useMemo(() => semanaDesde(monday), [monday])
 
@@ -69,7 +71,8 @@ export default function ProgramadorPage() {
       const { data } = await supabase
         .from('ope_ordenes')
         .select('orden,descripcion,cajas_jde,cant_declarada,linea_fracc,fe_solicitada,estado')
-        .in('estado', ESTADOS_BACKLOG)
+        .gte('estado', 40)
+        .neq('estado', 99)
         .gte('fe_solicitada', desde)
         .lt('fe_solicitada', hasta)
         .range(from, from + 999)
@@ -181,7 +184,7 @@ export default function ProgramadorPage() {
   )
 
   return (
-    <div className="max-w-[1500px] mx-auto">
+    <div className="w-full">
       {/* Pestañas de línea + navegación de semana */}
       <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
         <div className="flex gap-1.5">
@@ -316,7 +319,11 @@ export default function ProgramadorPage() {
                         style={{ top: (h / 24) * DIA_H }} />
                     ))}
 
-                    {bloques.map(p => <Bloque key={p.id} p={p} onQuitar={() => quitar(p)} />)}
+                    {bloques.map(p => (
+                      <Bloque key={p.id} p={p}
+                        onInfo={e => setInfo({ p, x: e.clientX, y: e.clientY })}
+                        onQuitar={() => quitar(p)} />
+                    ))}
                   </div>
                 </div>
               )
@@ -327,14 +334,22 @@ export default function ProgramadorPage() {
 
       <p className="text-[11px] text-stone-400 mt-3">
         Arrastrá una WO del panel izquierdo a un día para programarla en la línea <b>{linea}</b>.
-        La duración se calcula por cajas ÷ velocidad de línea + setup. Click en un bloque para quitarlo.
+        La duración se calcula por cajas ÷ velocidad de línea + setup. <b>Click</b> en un bloque para ver su info ·
+        pasá el mouse y <b>doble-click en la ✕</b> para quitarlo.
       </p>
+
+      {/* Popover de info al hacer click en un bloque */}
+      {info && <InfoPopover p={info.p} x={info.x} y={info.y} onClose={() => setInfo(null)} />}
     </div>
   )
 }
 
 // ── Bloque del Gantt ─────────────────────────────────────────────────────────
-function Bloque({ p, onQuitar }: { p: Programada; onQuitar: () => void }) {
+function Bloque({ p, onInfo, onQuitar }: {
+  p: Programada
+  onInfo: (e: MouseEvent) => void
+  onQuitar: () => void
+}) {
   const ini = new Date(p.hora_inicio)
   const minDesdeMedianoche = ini.getHours() * 60 + ini.getMinutes()
   const totalMin = p.setup_min + p.duracion_min
@@ -345,21 +360,75 @@ function Bloque({ p, onQuitar }: { p: Programada; onQuitar: () => void }) {
   const cruzaMedianoche = top + rawH > DIA_H
 
   return (
-    <button
-      onClick={onQuitar}
-      title={`${p.wo} · ${p.descripcion ?? ''}\n${fmtHora(p.hora_inicio)}–${fmtHora(p.hora_fin)} · ${totalMin} min${p.setup_min ? ` (setup ${p.setup_min})` : ''}\nClick para quitar`}
-      className="absolute left-0.5 right-0.5 rounded-md bg-red-800 hover:bg-red-700 text-white text-left px-1.5 py-1 overflow-hidden shadow-sm"
-      style={{ top, height: h }}
-    >
-      <div className="text-[10px] font-mono font-semibold leading-tight truncate">{p.wo}</div>
-      {h > 30 && (
-        <div className="text-[9px] opacity-80 leading-tight tabular-nums">
-          {fmtHora(p.hora_inicio)}{cruzaMedianoche ? ' ↓' : `–${fmtHora(p.hora_fin)}`}
+    <div className="group absolute left-0.5 right-0.5" style={{ top, height: h }}>
+      <div
+        onClick={onInfo}
+        className="w-full h-full rounded-md bg-red-800 hover:bg-red-700 text-white text-left px-1.5 py-1 overflow-hidden shadow-sm cursor-pointer"
+      >
+        <div className="text-[10px] font-mono font-semibold leading-tight truncate">{p.wo}</div>
+        {h > 30 && (
+          <div className="text-[9px] opacity-80 leading-tight tabular-nums">
+            {fmtHora(p.hora_inicio)}{cruzaMedianoche ? ' ↓' : `–${fmtHora(p.hora_fin)}`}
+          </div>
+        )}
+        {h > 44 && (
+          <div className="text-[9px] opacity-70 leading-tight truncate">{p.cajas?.toLocaleString('es-AR')} cj</div>
+        )}
+      </div>
+      {/* ✕ al pasar el mouse · doble-click para quitar */}
+      <button
+        onClick={e => e.stopPropagation()}
+        onDoubleClick={e => { e.stopPropagation(); onQuitar() }}
+        title="Doble-click para quitar del programa"
+        aria-label="Quitar (doble-click)"
+        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-white/90 text-red-700 text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm hover:bg-white"
+      >
+        ✕
+      </button>
+    </div>
+  )
+}
+
+// ── Popover de info de un bloque (click) ──────────────────────────────────────
+function InfoPopover({ p, x, y, onClose }: { p: Programada; x: number; y: number; onClose: () => void }) {
+  const totalMin = p.setup_min + p.duracion_min
+  const W = 256, H = 250
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 800
+  const left = Math.max(8, Math.min(x, vw - W - 8))
+  const top  = Math.max(8, Math.min(y, vh - H - 8))
+  return (
+    <>
+      <div className="fixed inset-0 z-40" onClick={onClose} />
+      <div className="fixed z-50 w-64 bg-white border border-stone-200 rounded-xl shadow-xl p-3 text-xs" style={{ left, top }}>
+        <div className="flex items-start justify-between gap-2 mb-1.5">
+          <span className="font-mono font-bold text-stone-900 text-sm">{p.wo}</span>
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-700 text-sm leading-none">✕</button>
         </div>
-      )}
-      {h > 44 && (
-        <div className="text-[9px] opacity-70 leading-tight truncate">{p.cajas?.toLocaleString('es-AR')} cj</div>
-      )}
-    </button>
+        <div className="text-stone-600 mb-2 leading-snug">{p.descripcion ?? '—'}</div>
+        <dl className="space-y-1">
+          <Row k="Línea" v={p.linea} />
+          <Row k="Día" v={p.fecha} />
+          <Row k="Horario" v={`${fmtHora(p.hora_inicio)}–${fmtHora(p.hora_fin)}`} />
+          <Row k="Total" v={`${totalMin} min`} />
+          <Row k="Producción" v={`${p.duracion_min} min`} />
+          <Row k="Setup" v={`${p.setup_min} min`} />
+          <Row k="Cajas" v={p.cajas != null ? p.cajas.toLocaleString('es-AR') : '—'} />
+          <Row k="Fracc." v={p.fraccionado ?? '—'} />
+        </dl>
+        <p className="text-[10px] text-stone-400 mt-2 leading-snug">
+          Para quitar: pasá el mouse sobre el bloque y doble-click en la ✕.
+        </p>
+      </div>
+    </>
+  )
+}
+
+function Row({ k, v }: { k: string; v: string }) {
+  return (
+    <div className="flex justify-between gap-3">
+      <dt className="text-stone-400">{k}</dt>
+      <dd className="text-stone-700 font-medium text-right">{v}</dd>
+    </div>
   )
 }
