@@ -61,6 +61,23 @@ Next.js 16.2.6 (Turbopack) · React 19 · Tailwind 4 · `@supabase/supabase-js`.
 
 ## Estado actual — lo hecho (mas nuevo arriba)
 
+- **Lote 2** (visual + mover bloques):
+  - **Bloques rediseñados**: N° de orden grande, **SKU** (`cod_item_largo`) y **duración** (`fmtDur`,
+    en vez del horario) siempre visibles; **borde marcado**; **banda de setup** arriba de cada orden
+    (rayada, con los minutos = "tiempo entre órdenes"; hoy usa el setup fijo, con **F3** será el real por
+    componente). SKU + código de vino se cargan **en memoria** al leer (`ope_ordenes.cod_item_largo` +
+    `producciones.insumo` → `codEqDeInsumo`), NO requieren columnas nuevas.
+  - **Agrupado por vino**: órdenes **consecutivas del mismo vino** quedan encerradas por un **borde de
+    color** (`gruposVino` + `colorDeVino`, color determinista por código).
+  - **Mover bloques (drag)**: un bloque programado ahora es **arrastrable** (solo PROGRAMADOR). Soltar en
+    **otro día** lo mueve (se agrega al final de ese día); soltar **sobre otra orden** lo inserta **antes**
+    de ella (reordenar, mismo día o entre días). `moverBloque(blockId, targetFecha, beforeId)` reordena
+    `orden_en_dia`, **recalcula la cadena** de los días afectados (`recalcCadena`) y persiste. NOTA: el
+    posicionamiento es **por orden** (las horas se recalculan en cadena desde las 06:00); NO es tiempo
+    libre arbitrario (eso sería otro modelo).
+  - **Pendiente que pidió Lautaro y es de fases siguientes**: el **% de uso / turno editable / % paradas**
+    es **F4** (capacidad) — todavía no existe, por eso no se ve. El **setup real por la regla del máximo**
+    (formato/color/azúcar/etc. con etiqueta de cuál manda) es **F3**.
 - **F1a** (acceso, parte 1): **AuthContext con roles** (port de ProgramacionCQ: `isAdmin = permisos['configuracion'].puede_ver`)
   + **pantalla de seleccion de linea al entrar** (`SelectorLinea`) + **gating por rol**: VISITA solo lee (sin drag,
   sin ✕ para quitar, sin editor de cajas), PROGRAMADOR edita. `linea` ahora es `Linea | null` (null = pantalla de
