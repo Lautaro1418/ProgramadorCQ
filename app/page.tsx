@@ -40,6 +40,15 @@ function horasSemana(l: string, turno: string): number {
   if (esL1L0(l)) return turno === '4T' ? 168 : 127   // 3T = lun 06:00 → sáb 13:00
   return turno === 'tarde' ? 40 : 47                  // mañana = Lun-Vie 06-14 + Sáb 06-13
 }
+// Horas disponibles un día puntual (dow 0=Lun..6=Dom) según el turno. La suma = horasSemana.
+function horasDia(l: string, turno: string, dow: number): number {
+  if (esL1L0(l)) {
+    if (turno === '4T') return 24                         // 24h los 7 días = 168
+    return [18, 24, 24, 24, 24, 13, 0][dow] ?? 0          // 3T: lun 06→24, mar-vie 24, sáb→13 = 127
+  }
+  if (turno === 'tarde') return dow <= 4 ? 8 : 0          // Lun-Vie 14-22 = 40
+  return dow <= 4 ? 8 : dow === 5 ? 7 : 0                 // mañana: Lun-Vie 06-14 + Sáb 06-13 = 47
+}
 const fmtH = (min: number) => `${(min / 60).toLocaleString('es-AR', { maximumFractionDigits: 1 })} h`
 
 // ¿Tengo yo el lock vigente de la línea L? (helper de módulo para usar sin orden de declaración)
@@ -308,8 +317,9 @@ export default function ProgramadorPage() {
     }
 
     // Capacidad / turnos de la semana (config por línea)
+    const semanasCap = [0, 7, 14, 21].map(o => toISODate(addDays(monday, o)))
     const { data: capData } = await supabase
-      .from('capacidad_linea').select('*').eq('semana', toISODate(monday))
+      .from('capacidad_linea').select('*').in('semana', semanasCap)
     const capMap: Record<string, CapRow> = {}
     ;(capData ?? []).forEach(r => { const rr = r as CapRow; capMap[`${rr.linea}|${rr.semana}`] = rr })
 
@@ -676,6 +686,21 @@ export default function ProgramadorPage() {
   const colMin  = zoom === 'dia' ? 360 : zoom === 'mes' ? 46 : 92
   const gridMin = 40 + dias.length * colMin
 
+  // % de uso de un día (capacidad del turno de la semana de ese día). -1 = sin turno ese día.
+  const pctDia = (isoDay: string): number => {
+    const dt = new Date(isoDay + 'T00:00:00')
+    const dow = (dt.getDay() + 6) % 7
+    const cap = linea ? capacidad[`${linea}|${toISODate(mondayOf(dt))}`] : undefined
+    const turno = linea ? (cap?.turno ?? defaultTurno(linea)) : ''
+    const paradas = (cap?.paradas_op ?? 0) + (cap?.paradas_ext ?? 0)
+    const capMin = (linea ? horasDia(linea, turno, dow) : 0) * 60 * Math.max(0, 1 - paradas / 100)
+    const used = programadasVisible
+      .filter(p => p.linea === linea && p.fecha === isoDay)
+      .reduce((s, p) => s + p.setup_min + p.duracion_min, 0)
+    if (capMin <= 0) return used > 0 ? Infinity : -1
+    return (used / capMin) * 100
+  }
+
   // Pantalla de selección de línea al entrar
   if (linea === null) {
     return <SelectorLinea isAdmin={isAdmin} onPick={l => setLinea(l)} />
@@ -877,6 +902,7 @@ export default function ProgramadorPage() {
                     className={`block w-full text-center pb-1 mb-0.5 rounded hover:bg-stone-100 ${isToday ? 'text-red-800' : 'text-stone-600'}`}>
                     <div className="text-[11px] font-semibold">{d.dow}</div>
                     <div className="text-[10px] tabular-nums">{d.label}</div>
+                    <PctBadge pct={pctDia(d.iso)} />
                   </button>
 
                   {/* Timeline drop-zone */}
@@ -1002,6 +1028,20 @@ function Bloque({ p, puedeEditar, onInfo, onQuitar, onMoveStart, onMoveEnd, onMo
           ✕
         </button>
       )}
+    </div>
+  )
+}
+
+// Badge de % de uso de un día (objetivo 100%). pct < 0 = sin turno ese día → no se muestra.
+function PctBadge({ pct }: { pct: number }) {
+  if (pct < 0) return null
+  const over = !Number.isFinite(pct) || pct > 105
+  const full = Number.isFinite(pct) && pct >= 95
+  const cls = over ? 'bg-red-100 text-red-700' : full ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+  return (
+    <div className={`mx-auto mt-0.5 w-fit px-1 rounded text-[9px] font-bold tabular-nums ${cls}`}
+      title="Uso del día (objetivo 100%)">
+      {Number.isFinite(pct) ? `${Math.round(pct)}%` : '+100%'}
     </div>
   )
 }
