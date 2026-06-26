@@ -699,8 +699,55 @@ export default function ProgramadorPage() {
     : zoom === 'mes'
       ? `Sem ${getISOWeek(monday)}–${getISOWeek(addDays(monday, 21))} · ${toISODate(monday).slice(5)}→${toISODate(addDays(monday, 27)).slice(5)}`
       : `Semana ${getISOWeek(monday)} · ${toISODate(monday).slice(5)}→${toISODate(addDays(monday, 6)).slice(5)}`
-  const colMin  = zoom === 'dia' ? 360 : zoom === 'mes' ? 46 : 108
-  const gridMin = 40 + dias.length * colMin
+  const colMin   = zoom === 'dia' ? 360 : zoom === 'mes' ? 84 : 108
+  const gridMin  = (zoom === 'mes' ? 7 : dias.length) * colMin
+  const dropMinH = zoom === 'mes' ? 96 : DIA_H
+
+  // Render de una columna-día (reutilizable: fila semanal o calendario 4×7)
+  const renderDia = (d: { iso: string; dow: string; label: string }) => {
+    const bloques = progLinea.filter(p => p.fecha === d.iso).sort((a, b) => a.orden_en_dia - b.orden_en_dia)
+    const isToday = d.iso === toISODate(new Date())
+    return (
+      <div key={d.iso} className="flex-1 flex flex-col border-l border-stone-100" style={{ minWidth: colMin }}>
+        <button
+          onClick={() => (zoom === 'dia' ? setZoom('semana') : verDia(d.iso))}
+          title={zoom === 'dia' ? 'Volver a la semana' : 'Ver este día en detalle'}
+          className={`block w-full text-center pb-1 mb-0.5 rounded hover:bg-stone-100 ${isToday ? 'text-red-800' : 'text-stone-600'}`}>
+          <div className="text-[11px] font-semibold">{d.dow}</div>
+          <div className="text-[10px] tabular-nums">{d.label}</div>
+          <PctBadge pct={pctDia(d.iso)} />
+        </button>
+        <div
+          onDragOver={e => e.preventDefault()}
+          onDrop={() => {
+            if (puedeEditar) {
+              if (dragWo) { const wo = backlog.find(w => w.orden === dragWo); if (wo) programar(wo, d.iso) }
+              else if (dragBlock != null) { moverBloque(dragBlock, d.iso, null) }
+            }
+            setDragWo(null); setDragBlock(null)
+          }}
+          className={`flex-1 flex flex-col gap-0.5 mx-0.5 p-0.5 rounded-md border border-dashed transition-colors ${
+            (dragWo || dragBlock != null) ? 'border-red-300 bg-red-50/40' : 'border-stone-200 bg-stone-50/40'
+          }`}
+          style={{ minHeight: dropMinH }}
+        >
+          {bloques.map((p, i) => (
+            <Fragment key={p.id}>
+              {i > 0 && p.setup_min > 0 && zoom !== 'mes' && (
+                <SetupBar min={p.setup_min} label={p.setupLabel} />
+              )}
+              <OrderCard p={p} puedeEditar={puedeEditar} compact={zoom === 'mes'}
+                onInfo={e => setInfo({ id: p.id, x: e.clientX, y: e.clientY })}
+                onQuitar={() => quitar(p)}
+                onMoveStart={() => { setDragBlock(p.id); setDragWo(null) }}
+                onMoveEnd={() => { setDragBlock(null); setDragWo(null) }}
+                onMoveDropHere={() => { if (dragBlock != null && dragBlock !== p.id) moverBloque(dragBlock, p.fecha, p.id); setDragBlock(null); setDragWo(null) }} />
+            </Fragment>
+          ))}
+        </div>
+      </div>
+    )
+  }
 
   // % de uso de un día (capacidad del turno de la semana de ese día). -1 = sin turno ese día.
   const pctDia = (isoDay: string): number => {
@@ -888,59 +935,22 @@ export default function ProgramadorPage() {
           </div>
         </div>
 
-        {/* ── Grilla Gantt semanal ── */}
+        {/* ── Grilla ── */}
         <div className="bg-white border border-stone-200 rounded-xl p-3 overflow-x-auto">
-          <div className="flex" style={{ minWidth: gridMin }}>
-            {dias.map(d => {
-              const bloques = progLinea
-                .filter(p => p.fecha === d.iso)
-                .sort((a, b) => a.orden_en_dia - b.orden_en_dia)
-              const isToday = d.iso === toISODate(new Date())
-              return (
-                <div key={d.iso} className="flex-1 flex flex-col border-l border-stone-100" style={{ minWidth: colMin }}>
-                  {/* Encabezado del día (click = zoom a ese día) */}
-                  <button
-                    onClick={() => (zoom === 'dia' ? setZoom('semana') : verDia(d.iso))}
-                    title={zoom === 'dia' ? 'Volver a la semana' : 'Ver este día en detalle'}
-                    className={`block w-full text-center pb-1 mb-0.5 rounded hover:bg-stone-100 ${isToday ? 'text-red-800' : 'text-stone-600'}`}>
-                    <div className="text-[11px] font-semibold">{d.dow}</div>
-                    <div className="text-[10px] tabular-nums">{d.label}</div>
-                    <PctBadge pct={pctDia(d.iso)} />
-                  </button>
-
-                  {/* Lista apilada de órdenes (drop-zone) */}
-                  <div
-                    onDragOver={e => e.preventDefault()}
-                    onDrop={() => {
-                      if (puedeEditar) {
-                        if (dragWo) { const wo = backlog.find(w => w.orden === dragWo); if (wo) programar(wo, d.iso) }
-                        else if (dragBlock != null) { moverBloque(dragBlock, d.iso, null) }
-                      }
-                      setDragWo(null); setDragBlock(null)
-                    }}
-                    className={`flex-1 flex flex-col gap-0.5 mx-0.5 p-0.5 rounded-md border border-dashed transition-colors ${
-                      (dragWo || dragBlock != null) ? 'border-red-300 bg-red-50/40' : 'border-stone-200 bg-stone-50/40'
-                    }`}
-                    style={{ minHeight: DIA_H }}
-                  >
-                    {bloques.map((p, i) => (
-                      <Fragment key={p.id}>
-                        {i > 0 && p.setup_min > 0 && zoom !== 'mes' && (
-                          <SetupBar min={p.setup_min} label={p.setupLabel} />
-                        )}
-                        <OrderCard p={p} puedeEditar={puedeEditar} compact={zoom === 'mes'}
-                          onInfo={e => setInfo({ id: p.id, x: e.clientX, y: e.clientY })}
-                          onQuitar={() => quitar(p)}
-                          onMoveStart={() => { setDragBlock(p.id); setDragWo(null) }}
-                          onMoveEnd={() => { setDragBlock(null); setDragWo(null) }}
-                          onMoveDropHere={() => { if (dragBlock != null && dragBlock !== p.id) moverBloque(dragBlock, p.fecha, p.id); setDragBlock(null); setDragWo(null) }} />
-                      </Fragment>
-                    ))}
-                  </div>
+          {zoom === 'mes' ? (
+            // 4 semanas, una encima de otra (calendario L M Mi J V S D × 4)
+            <div className="flex flex-col gap-3" style={{ minWidth: gridMin }}>
+              {[0, 1, 2, 3].map(wk => (
+                <div key={wk} className="flex border-t border-stone-100 pt-1 first:border-t-0 first:pt-0">
+                  {dias.slice(wk * 7, wk * 7 + 7).map(renderDia)}
                 </div>
-              )
-            })}
-          </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex" style={{ minWidth: gridMin }}>
+              {dias.map(renderDia)}
+            </div>
+          )}
         </div>
       </div>
 
