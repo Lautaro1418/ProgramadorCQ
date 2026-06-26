@@ -156,14 +156,9 @@ function botellaCode(ifr: string | null | undefined): string | null {
   return s.length >= 3 ? s.slice(-3) : s
 }
 
-// Estado JDE → etiqueta corta. "Hecha" = ya producida (>= 60).
-const ESTADOS_JDE: Record<number, string> = {
-  5: 'Creada', 10: 'Rev BOM', 40: 'Aprob', 41: 'Lote act', 45: 'En proceso',
-  60: 'Term parc', 90: 'Terminada', 98: 'Contab', 99: 'Cancel',
-}
+// Estado JDE: se muestra el NÚMERO (no la descripción). "Hecha" = ya producida (>= 60).
 function estadoLabel(n: number | null | undefined): string {
-  if (n == null) return '—'
-  return ESTADOS_JDE[n] ?? String(n)
+  return n == null ? '—' : String(n)
 }
 function esHecha(n: number | null | undefined): boolean {
   return n != null && n >= 60
@@ -539,7 +534,23 @@ export default function ProgramadorPage() {
       .single()
 
     if (error) { alert('Error al programar: ' + error.message); return }
-    setProgramadas(prev => [...prev, { ...(data as Programada), setupLabel }])
+    // Enriquecer la orden nueva (SKU/vino/botella/añada/alcohol/estado) para que NO salga "—" hasta recargar
+    const [oeRes, prRes, biRes] = await Promise.all([
+      supabase.from('ope_ordenes').select('cod_item_largo,cosecha,alcohol,estado').eq('orden', wo.orden).maybeSingle(),
+      supabase.from('producciones').select('insumo').eq('orden', wo.orden).maybeSingle(),
+      supabase.from('producciones_insumos').select('insumo').eq('orden', wo.orden).eq('familia', 'BOTELLA').maybeSingle(),
+    ])
+    const oe = oeRes.data as { cod_item_largo: string | null; cosecha: string | number | null; alcohol: string | number | null; estado: number | null } | null
+    const v  = vinoInfo((prRes.data as { insumo: string | null } | null)?.insumo ?? null)
+    const enriched: Programada = {
+      ...(data as Programada), setupLabel,
+      sku: oe?.cod_item_largo ?? null,
+      codEq: v.code, vinoCode: v.code, esEstiba: v.estiba,
+      botella: botellaCode((biRes.data as { insumo: string | null } | null)?.insumo ?? null),
+      cosecha: oe?.cosecha ?? null, alcohol: oe?.alcohol ?? null,
+      estadoJde: oe?.estado != null ? Number(oe.estado) : null,
+    }
+    setProgramadas(prev => [...prev, enriched])
     setBacklog(prev => prev.filter(w => w.orden !== wo.orden))
   }
 
@@ -1011,14 +1022,15 @@ export default function ProgramadorPage() {
   )
 }
 
-// Campo etiquetado para la vista diaria (label arriba, valor grande abajo).
+// Campo etiquetado para la vista diaria (label arriba, valor grande abajo). Bloques para
+// que `text-right` y `truncate` funcionen dentro de la grilla de ancho fijo.
 function Campo({ label, value, big, mono, className }: {
   label: string; value: string; big?: boolean; mono?: boolean; className?: string
 }) {
   return (
-    <div className={`flex flex-col leading-tight min-w-0 ${className ?? ''}`}>
-      <span className="text-[9px] font-medium uppercase tracking-wide text-stone-500">{label}</span>
-      <span className={`${big ? 'text-[15px] font-bold' : 'text-[13px] font-semibold'} ${mono ? 'font-mono' : ''} truncate`}>{value}</span>
+    <div className={`leading-tight min-w-0 ${className ?? ''}`}>
+      <div className="text-[9px] font-medium uppercase tracking-wide text-stone-500 truncate">{label}</div>
+      <div className={`${big ? 'text-[15px] font-bold' : 'text-[13px] font-semibold'} ${mono ? 'font-mono' : ''} truncate`}>{value}</div>
     </div>
   )
 }
@@ -1069,18 +1081,18 @@ function OrderCard({ p, puedeEditar, variant, onInfo, onQuitar, onMoveStart, onM
             <span className="text-[9px] font-bold font-mono truncate">{p.wo}</span>
           </div>
         ) : variant === 'wide' ? (
-          <div className="flex items-center h-full pl-3 pr-8 gap-x-6 gap-y-1 flex-wrap">
+          <div className="grid items-center h-full pl-3 pr-8 gap-x-3"
+            style={{ gridTemplateColumns: '90px 150px 60px 64px 64px 56px 56px 1fr 80px 72px' }}>
             <Campo label="ORDEN" value={p.wo} big mono />
-            {p.sku && <Campo label="SKU" value={p.sku} mono />}
+            <Campo label="SKU" value={p.sku ?? '—'} mono />
             <Campo label={p.esEstiba ? 'ESTIBA' : 'VINO'} value={p.vinoCode ?? '—'} mono />
             <Campo label="BOTELLA" value={p.botella ?? '—'} mono />
             <Campo label="TIEMPO" value={fmtDur(p.duracion_min)} />
-            {p.cosecha != null && p.cosecha !== '' && <Campo label="AÑADA" value={String(p.cosecha)} />}
-            {fmtAlcohol(p.alcohol) && <Campo label="ALC" value={fmtAlcohol(p.alcohol)} />}
-            <div className="ml-auto flex items-center gap-x-5 text-right">
-              <Campo label="ESTADO" value={estadoLabel(p.estadoJde)} />
-              <Campo label="CAJAS" value={cant} big />
-            </div>
+            <Campo label="AÑADA" value={p.cosecha != null && p.cosecha !== '' ? String(p.cosecha) : '—'} />
+            <Campo label="ALC" value={fmtAlcohol(p.alcohol) || '—'} />
+            <div />
+            <Campo label="ESTADO" value={estadoLabel(p.estadoJde)} className="text-right" />
+            <Campo label="CAJAS" value={cant} big className="text-right" />
           </div>
         ) : (
           <div className="px-1.5 py-1 leading-tight">
