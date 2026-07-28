@@ -11,8 +11,10 @@ import { buildSetupMaps, emptySetupMaps, setupEntre, type SetupMaps } from '@/li
 import RefreshButton from '@/components/RefreshButton'
 
 // ── Constantes ───────────────────────────────────────────────────────────────
-const LINEAS = ['L1', 'L2', 'L0', 'TM'] as const
+const LINEAS = ['L1', 'L2', 'L0', 'TM', 'LM'] as const
 type Linea = (typeof LINEAS)[number]
+// Backlog por planta: LM (línea móvil) = planta 3012; el resto (L0/L1/L2/TM) = planta 1032.
+const plantaDeLinea = (l: string) => (l === 'LM' ? '3012' : '1032')
 
 // Backlog: ordenes con estado >= 40 (40/41 listas · 45 en proceso · 60 c/control pendiente · 98 OK),
 // excepto 99 (canceladas). Las < 40 no se muestran.
@@ -65,6 +67,7 @@ interface WoBacklog {
   linea_fracc: string | null
   fraccionado: 'SI' | 'NO'
   fe_solicitada: string | null
+  planta: string | null
 }
 
 interface Programada {
@@ -229,7 +232,7 @@ export default function ProgramadorPage() {
     for (let from = 0; ; from += 1000) {
       const { data } = await supabase
         .from('ope_ordenes')
-        .select('orden,descripcion,cajas_jde,cant_declarada,linea_fracc,fe_solicitada,estado,cosecha,alcohol')
+        .select('orden,descripcion,cajas_jde,cant_declarada,linea_fracc,fe_solicitada,estado,cosecha,alcohol,planta')
         .gte('estado', 40)
         .neq('estado', 99)
         .gte('fe_solicitada', bkDesde)
@@ -244,6 +247,7 @@ export default function ProgramadorPage() {
           linea_fracc: (r.linea_fracc as string) ?? null,
           fraccionado: r.linea_fracc ? 'SI' : 'NO',
           fe_solicitada: (r.fe_solicitada as string) ?? null,
+          planta: r.planta == null ? null : String(r.planta),
         })
       }
       if (data.length < 1000) break
@@ -693,8 +697,9 @@ export default function ProgramadorPage() {
   const progWosVisible = useMemo(() => new Set(programadasVisible.map(p => p.wo)), [programadasVisible])
   const backlogVisible = useMemo(() => backlog.filter(w =>
     !progWosVisible.has(w.orden) &&
+    (linea == null || w.planta === plantaDeLinea(linea)) &&
     (!q || w.orden.toLowerCase().includes(q) || (w.descripcion ?? '').toLowerCase().includes(q))
-  ), [backlog, q, progWosVisible])
+  ), [backlog, q, progWosVisible, linea])
 
   const progLinea = useMemo(
     () => programadasVisible.filter(p => p.linea === linea),
@@ -1279,12 +1284,12 @@ function SelectorLinea({ isAdmin, onPick }: { isAdmin: boolean; onPick: (l: Line
           ? 'Como programador podés ver y editar.'
           : 'Modo solo lectura (visita): vas a poder ver, pero no modificar.'}
       </p>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
         {LINEAS.map(l => (
           <button key={l} onClick={() => onPick(l)}
             className="w-28 h-24 rounded-xl border border-stone-200 bg-white hover:border-red-400 hover:bg-red-50/40 shadow-sm flex flex-col items-center justify-center transition-colors">
             <span className="text-2xl font-bold text-stone-800">{l}</span>
-            <span className="text-[11px] text-stone-400 mt-1">{l === 'TM' ? 'Tareas manuales' : 'Fraccionamiento'}</span>
+            <span className="text-[11px] text-stone-400 mt-1">{l === 'TM' ? 'Tareas manuales' : l === 'LM' ? 'Línea móvil' : 'Fraccionamiento'}</span>
           </button>
         ))}
       </div>
