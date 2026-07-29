@@ -264,10 +264,12 @@ export default function ProgramadorPage() {
     }
 
     // Ya programadas (todas las líneas, para excluir del backlog y pintar la grilla)
-    const { data: prog } = await supabase
+    const { data: prog, error: progErr } = await supabase
       .from('produccion_programada')
       .select('*')
       .order('orden_en_dia')
+    // Si falla, NO pisar lo que ya estaba en pantalla con una lista vacía: cortar acá.
+    if (progErr) { alert('Error al leer el programa: ' + progErr.message); setLoading(false); return }
 
     // Velocidades + botella por WO (para duración)
     const [velRes, insRes] = await Promise.all([
@@ -678,6 +680,7 @@ export default function ProgramadorPage() {
       .eq('linea', L).eq('estado', 'borrador')
     if (e2) { alert('Error al plasmar: ' + e2.message); return }
     await ensureDraft(L)   // re-forkea un borrador fresco desde el nuevo oficial (incluye cargar)
+    alert('Programa de ' + L + ' plasmado: ya es oficial y el resto lo ve.')
   }
 
   // Descarta el borrador de la línea: vuelve a un borrador limpio = copia del oficial.
