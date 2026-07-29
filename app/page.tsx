@@ -638,22 +638,30 @@ export default function ProgramadorPage() {
   // ── Borrador / Plasmar (F2) ──────────────────────────────────────────────────
   // Forkea el oficial de la línea a un borrador propio (si todavía no tengo uno).
   async function ensureDraft(L: string) {
-    const { data: existing } = await supabase.from('produccion_programada')
+    const { data: existing, error: e1 } = await supabase.from('produccion_programada')
       .select('id,usuario_email').eq('linea', L).eq('estado', 'borrador')
+    if (e1) { alert('Error al preparar el borrador: ' + e1.message); return }
     const rows = (existing ?? []) as { id: number; usuario_email: string | null }[]
     if (rows.some(r => r.usuario_email === (perfil?.email ?? ''))) return   // ya tengo borrador propio
-    if (rows.length) await supabase.from('produccion_programada').delete().eq('linea', L).eq('estado', 'borrador')
-    const { data: oficiales } = await supabase.from('produccion_programada')
+    if (rows.length) {
+      const { error: e2 } = await supabase.from('produccion_programada').delete().eq('linea', L).eq('estado', 'borrador')
+      if (e2) { alert('Error al preparar el borrador: ' + e2.message); return }
+    }
+    const { data: oficiales, error: e3 } = await supabase.from('produccion_programada')
       .select('*').eq('linea', L).eq('estado', 'oficial')
+    if (e3) { alert('Error al preparar el borrador: ' + e3.message); return }
     const ofs = (oficiales ?? []) as Programada[]
     if (ofs.length) {
-      await supabase.from('produccion_programada').insert(ofs.map(p => ({
+      const { error: e4 } = await supabase.from('produccion_programada').insert(ofs.map(p => ({
         wo: p.wo, linea: p.linea, fecha: p.fecha, hora_inicio: p.hora_inicio, hora_fin: p.hora_fin,
         duracion_min: p.duracion_min, setup_min: p.setup_min, orden_en_dia: p.orden_en_dia,
         descripcion: p.descripcion, cajas: p.cajas, cajas_ajustado: p.cajas_ajustado,
         fraccionado: p.fraccionado, estado: 'borrador',
         usuario_email: perfil?.email ?? null, usuario_nombre: perfil?.nombre ?? null,
       })))
+      // ponytail: si esto tira "duplicate key ... produccion_programada_wo_unique", falta
+      // correr migrations/produccion_programada_wo_estado.sql en Supabase (unique wo,estado).
+      if (e4) { alert('Error al preparar el borrador: ' + e4.message); return }
     }
     await cargar()
   }
@@ -664,9 +672,11 @@ export default function ProgramadorPage() {
     if (!linea || !puedeEditar || !draftEnabled) return
     const L = linea
     // Con la unique (wo, estado): 1) borrar el oficial viejo, 2) promover el borrador a oficial.
-    await supabase.from('produccion_programada').delete().eq('linea', L).eq('estado', 'oficial')
-    await supabase.from('produccion_programada').update({ estado: 'oficial' })
+    const { error: e1 } = await supabase.from('produccion_programada').delete().eq('linea', L).eq('estado', 'oficial')
+    if (e1) { alert('Error al plasmar: ' + e1.message); return }
+    const { error: e2 } = await supabase.from('produccion_programada').update({ estado: 'oficial' })
       .eq('linea', L).eq('estado', 'borrador')
+    if (e2) { alert('Error al plasmar: ' + e2.message); return }
     await ensureDraft(L)   // re-forkea un borrador fresco desde el nuevo oficial (incluye cargar)
   }
 
@@ -674,7 +684,8 @@ export default function ProgramadorPage() {
   async function descartarBorrador() {
     if (!linea || !puedeEditar || !draftEnabled) return
     const L = linea
-    await supabase.from('produccion_programada').delete().eq('linea', L).eq('estado', 'borrador')
+    const { error } = await supabase.from('produccion_programada').delete().eq('linea', L).eq('estado', 'borrador')
+    if (error) { alert('Error al descartar: ' + error.message); return }
     await ensureDraft(L)
   }
 
