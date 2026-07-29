@@ -228,29 +228,39 @@ export default function ProgramadorPage() {
     const hasta = toISODate(new Date(Math.max(addDays(monday, 28).getTime(), addDays(hoy, 35).getTime())))
 
     // Backlog: WOs de JDE aprobadas/en proceso (estado>=40, !=99), de hoy a +35 días
+    const OPE_COLS = 'orden,descripcion,cajas_jde,cant_declarada,linea_fracc,fe_solicitada,estado,cosecha,alcohol,planta'
+    const mapWo = (r: Record<string, unknown>): WoBacklog => ({
+      orden: String(r.orden),
+      descripcion: (r.descripcion as string) ?? null,
+      cajas: Number(r.cajas_jde ?? r.cant_declarada ?? 0),
+      linea_fracc: (r.linea_fracc as string) ?? null,
+      fraccionado: r.linea_fracc ? 'SI' : 'NO',
+      fe_solicitada: (r.fe_solicitada as string) ?? null,
+      planta: r.planta == null ? null : String(r.planta),
+    })
     const woRows: WoBacklog[] = []
     for (let from = 0; ; from += 1000) {
       const { data } = await supabase
         .from('ope_ordenes')
-        .select('orden,descripcion,cajas_jde,cant_declarada,linea_fracc,fe_solicitada,estado,cosecha,alcohol,planta')
+        .select(OPE_COLS)
         .gte('estado', 40)
         .neq('estado', 99)
         .gte('fe_solicitada', bkDesde)
         .lte('fe_solicitada', bkHasta)
         .range(from, from + 999)
       if (!data || data.length === 0) break
-      for (const r of data as Record<string, unknown>[]) {
-        woRows.push({
-          orden: String(r.orden),
-          descripcion: (r.descripcion as string) ?? null,
-          cajas: Number(r.cajas_jde ?? r.cant_declarada ?? 0),
-          linea_fracc: (r.linea_fracc as string) ?? null,
-          fraccionado: r.linea_fracc ? 'SI' : 'NO',
-          fe_solicitada: (r.fe_solicitada as string) ?? null,
-          planta: r.planta == null ? null : String(r.planta),
-        })
-      }
+      for (const r of data as Record<string, unknown>[]) woRows.push(mapWo(r))
       if (data.length < 1000) break
+    }
+
+    // LM (planta 3012): sus órdenes tienen fecha de sistema pasada y caen fuera de la
+    // ventana hoy→+35, así que se traen TODAS las pendientes sin filtro de fecha.
+    const vistos = new Set(woRows.map(w => w.orden))
+    const { data: lmData } = await supabase
+      .from('ope_ordenes').select(OPE_COLS)
+      .eq('planta', '3012').gte('estado', 40).neq('estado', 99)
+    for (const r of (lmData ?? []) as Record<string, unknown>[]) {
+      const w = mapWo(r); if (!vistos.has(w.orden)) woRows.push(w)
     }
 
     // Ya programadas (todas las líneas, para excluir del backlog y pintar la grilla)
@@ -699,7 +709,8 @@ export default function ProgramadorPage() {
     !progWosVisible.has(w.orden) &&
     (linea == null || w.planta === plantaDeLinea(linea)) &&
     (!q || w.orden.toLowerCase().includes(q) || (w.descripcion ?? '').toLowerCase().includes(q))
-  ), [backlog, q, progWosVisible, linea])
+  ).sort((a, b) => (a.fe_solicitada ?? '9999').localeCompare(b.fe_solicitada ?? '9999')),
+  [backlog, q, progWosVisible, linea])
 
   const progLinea = useMemo(
     () => programadasVisible.filter(p => p.linea === linea),
@@ -987,6 +998,11 @@ export default function ProgramadorPage() {
                 <div className="text-[11px] text-stone-400 mt-0.5 tabular-nums">
                   {w.cajas.toLocaleString('es-AR')} cajas
                 </div>
+                {w.fe_solicitada && (
+                  <div className="text-[11px] text-stone-500 mt-0.5 tabular-nums">
+                    📅 {w.fe_solicitada.slice(8, 10)}/{w.fe_solicitada.slice(5, 7)}/{w.fe_solicitada.slice(0, 4)}
+                  </div>
+                )}
               </div>
             ))}
           </div>
