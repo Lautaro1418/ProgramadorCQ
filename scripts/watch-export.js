@@ -29,6 +29,14 @@ function supabase() {
 
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
+// fetch envuelve los errores de red en un "TypeError: fetch failed" que no dice nada:
+// el motivo real (ENOTFOUND, ECONNREFUSED, certificado, timeout) viaja en e.cause.
+function detalleError(e) {
+  const partes = [e.message];
+  for (let c = e.cause; c; c = c.cause) partes.push(c.code || c.message);
+  return partes.join(' <- ');
+}
+
 /** Toma el pedido pendiente más viejo y lo ejecuta. Devuelve true si procesó algo. */
 async function procesarUno(sb, archivo) {
   const { data: pend, error } = await sb.from('export_log')
@@ -50,10 +58,11 @@ async function procesarUno(sb, archivo) {
     }).eq('id', pedido.id);
     log(`#${pedido.id} completado — ${detalle}`);
   } catch (e) {
+    const detalle = detalleError(e).slice(0, 500);
     await sb.from('export_log').update({
-      status: 'error', completed_at: new Date().toISOString(), detalle: String(e.message).slice(0, 500), archivo,
+      status: 'error', completed_at: new Date().toISOString(), detalle, archivo,
     }).eq('id', pedido.id);
-    log(`#${pedido.id} ERROR — ${e.message}`);
+    log(`#${pedido.id} ERROR — ${detalle}`);
   }
   return true;
 }
@@ -73,7 +82,7 @@ async function main() {
   log(`Escuchando pedidos cada ${POLL_MS / 1000}s. Ctrl+C para salir.`);
   for (;;) {
     try { while (await procesarUno(sb, archivo)); }
-    catch (e) { log('fallo del ciclo (reintento): ' + e.message); }   // no matar el watcher por un error puntual
+    catch (e) { log('fallo del ciclo (reintento): ' + detalleError(e)); }   // no matar el watcher por un error puntual
     await new Promise(r => setTimeout(r, POLL_MS));
   }
 }
