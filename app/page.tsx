@@ -1107,9 +1107,11 @@ export default function ProgramadorPage() {
       </div>
       )}
 
-      <div className="grid grid-cols-[280px_1fr] gap-4">
+      <div className="grid grid-cols-[280px_1fr] gap-4 items-start">
         {/* ── Backlog ── */}
-        <div className="bg-white border border-stone-200 rounded-xl p-3 h-[560px] flex flex-col">
+        {/* sticky: la grilla de la derecha puede crecer mucho más que el panel (vista Día,
+            muchas órdenes); sin esto el panel se iba de la pantalla al scrollear. */}
+        <div className="bg-white border border-stone-200 rounded-xl p-3 h-[560px] flex flex-col sticky top-3 z-10">
           {/* En LM no aplica: el Programable es de las líneas de fraccionamiento directo. */}
           {!esLM(linea) ? (
             <div className="flex rounded-lg bg-stone-100 p-0.5 mb-2">
