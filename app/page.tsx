@@ -18,6 +18,11 @@ type Linea = (typeof LINEAS)[number]
 const plantaDeLinea = (l: string) => (l === 'LM' ? '3012' : '1032')
 // LM no se mide por capacidad: no tiene turnos, ni velocidad, ni % de uso.
 const esLM = (l: string) => l === 'LM'
+// Estados JDE del backlog. Se muestra el número; la etiqueta va en el tooltip.
+const ESTADO_LABEL: Record<number, string> = {
+  40: 'Lista', 41: 'Lista', 45: 'En proceso', 60: 'Control pendiente', 98: 'OK',
+}
+const estadoLabelDe = (n: number | null) => n == null ? 'sin estado' : (ESTADO_LABEL[n] ?? 'estado ' + n)
 // LM se vuelca a PROG-LM, cuyas hojas solo tienen bloques de lunes a sábado:
 // una orden en domingo no tendría dónde ir, así que no se permite.
 function fechaPermitida(l: string, iso: string): boolean {
@@ -76,6 +81,7 @@ interface WoBacklog {
   fraccionado: 'SI' | 'NO'
   fe_solicitada: string | null
   planta: string | null
+  estado: number | null           // estado JDE: 40/41 listas · 45 en proceso · 60 control pend. · 98 OK
 }
 
 interface Programada {
@@ -200,6 +206,8 @@ export default function ProgramadorPage() {
   const [setupMaps, setSetupMaps] = useState<SetupMaps>(() => emptySetupMaps())
   const [loading, setLoading] = useState(true)
   const [search, setSearch]   = useState('')
+  // Filtro de estado del backlog. Vacío = todos (no esconde nada sin querer).
+  const [estadosSel, setEstadosSel] = useState<Set<number>>(new Set())
   const [dragWo, setDragWo]   = useState<string | null>(null)
   const [info, setInfo]       = useState<{ id: number; x: number; y: number } | null>(null)
   const [dragBlock, setDragBlock] = useState<number | null>(null)
@@ -245,6 +253,7 @@ export default function ProgramadorPage() {
       fraccionado: r.linea_fracc ? 'SI' : 'NO',
       fe_solicitada: (r.fe_solicitada as string) ?? null,
       planta: r.planta == null ? null : String(r.planta),
+      estado: r.estado == null ? null : Number(r.estado),
     })
     const woRows: WoBacklog[] = []
     for (let from = 0; ; from += 1000) {
@@ -735,12 +744,24 @@ export default function ProgramadorPage() {
   }, [programadas, locks, draftEnabled, perfil?.email])
 
   const progWosVisible = useMemo(() => new Set(programadasVisible.map(p => p.wo)), [programadasVisible])
-  const backlogVisible = useMemo(() => backlog.filter(w =>
+  // Backlog de la línea, SIN el filtro de estado: de acá salen los chips con su conteo
+  // (si se calcularan sobre lo ya filtrado, al tildar uno desaparecerían los demás).
+  const backlogLinea = useMemo(() => backlog.filter(w =>
     !progWosVisible.has(w.orden) &&
     (linea == null || w.planta === plantaDeLinea(linea)) &&
     (!q || w.orden.toLowerCase().includes(q) || (w.descripcion ?? '').toLowerCase().includes(q))
-  ).sort((a, b) => (a.fe_solicitada ?? '9999').localeCompare(b.fe_solicitada ?? '9999')),
-  [backlog, q, progWosVisible, linea])
+  ), [backlog, q, progWosVisible, linea])
+
+  const estadosDisponibles = useMemo(() => {
+    const c = new Map<number, number>()
+    for (const w of backlogLinea) if (w.estado != null) c.set(w.estado, (c.get(w.estado) ?? 0) + 1)
+    return [...c.entries()].sort((a, b) => a[0] - b[0])
+  }, [backlogLinea])
+
+  const backlogVisible = useMemo(() => backlogLinea
+    .filter(w => estadosSel.size === 0 || (w.estado != null && estadosSel.has(w.estado)))
+    .sort((a, b) => (a.fe_solicitada ?? '9999').localeCompare(b.fe_solicitada ?? '9999')),
+  [backlogLinea, estadosSel])
 
   const progLinea = useMemo(
     () => programadasVisible.filter(p => p.linea === linea),
@@ -997,7 +1018,9 @@ export default function ProgramadorPage() {
             <h2 className="text-xs font-bold uppercase tracking-wider text-stone-500">
               WOs sin programar
             </h2>
-            <span className="text-[11px] text-stone-400">{backlogVisible.length}</span>
+            <span className="text-[11px] text-stone-400">
+              {backlogVisible.length}{estadosSel.size > 0 && ` de ${backlogLinea.length}`}
+            </span>
           </div>
           <input
             value={search}
@@ -1005,6 +1028,38 @@ export default function ProgramadorPage() {
             placeholder="Buscar WO o descripción…"
             className="w-full border border-stone-200 rounded-lg px-2.5 py-1.5 text-xs mb-2 focus:outline-none focus:border-red-400"
           />
+          {estadosDisponibles.length > 1 && (
+            <div className="flex items-center gap-1 flex-wrap mb-2">
+              <span className="text-[10px] uppercase tracking-wider text-stone-400 mr-0.5">Estado</span>
+              {estadosDisponibles.map(([est, n]) => {
+                const on = estadosSel.has(est)
+                return (
+                  <button
+                    key={est}
+                    onClick={() => setEstadosSel(prev => {
+                      const s = new Set(prev)
+                      if (s.has(est)) s.delete(est); else s.add(est)
+                      return s
+                    })}
+                    title={`${estadoLabelDe(est)} · ${n} ${n === 1 ? 'orden' : 'órdenes'}`}
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-semibold tabular-nums border transition-colors ${
+                      on ? 'bg-red-900 text-onbrand border-red-900'
+                         : 'bg-stone-50 text-stone-600 border-stone-200 hover:border-stone-300'
+                    }`}
+                  >
+                    {est} <span className="opacity-70">{n}</span>
+                  </button>
+                )
+              })}
+              {estadosSel.size > 0 && (
+                <button onClick={() => setEstadosSel(new Set())}
+                  title="Mostrar todos los estados"
+                  className="px-1.5 py-0.5 rounded text-[10px] text-stone-500 hover:text-stone-700 underline">
+                  limpiar
+                </button>
+              )}
+            </div>
+          )}
           <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
             {loading && <p className="text-xs text-stone-400">Cargando…</p>}
             {!loading && backlogVisible.length === 0 && (
@@ -1022,9 +1077,12 @@ export default function ProgramadorPage() {
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-mono font-semibold text-stone-800 text-xs">{w.orden}</span>
-                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${
-                    w.fraccionado === 'SI' ? 'bg-emerald-100 text-emerald-700' : 'bg-stone-200 text-stone-500'
-                  }`}>{w.fraccionado === 'SI' ? 'Fracc.' : 'No fracc.'}</span>
+                  {w.estado != null && (
+                    <span title={estadoLabelDe(w.estado)}
+                      className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full tabular-nums ${
+                        w.estado >= 60 ? 'bg-stone-200 text-stone-600' : 'bg-sky-100 text-sky-700'
+                      }`}>{w.estado}</span>
+                  )}
                 </div>
                 <div className="text-[11px] text-stone-600 truncate mt-0.5" title={w.descripcion ?? ''}>
                   {w.descripcion ?? '—'}
