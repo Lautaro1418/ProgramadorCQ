@@ -15,6 +15,8 @@ const LINEAS = ['L1', 'L2', 'L0', 'TM', 'LM'] as const
 type Linea = (typeof LINEAS)[number]
 // Backlog por planta: LM (línea móvil) = planta 3012; el resto (L0/L1/L2/TM) = planta 1032.
 const plantaDeLinea = (l: string) => (l === 'LM' ? '3012' : '1032')
+// LM no se mide por capacidad: no tiene turnos, ni velocidad, ni % de uso.
+const esLM = (l: string) => l === 'LM'
 
 // Backlog: ordenes con estado >= 40 (40/41 listas · 45 en proceso · 60 c/control pendiente · 98 OK),
 // excepto 99 (canceladas). Las < 40 no se muestran.
@@ -833,6 +835,7 @@ export default function ProgramadorPage() {
 
   // % de uso de un día (capacidad del turno de la semana de ese día). -1 = sin turno ese día.
   const pctDia = (isoDay: string): number => {
+    if (linea && esLM(linea)) return -1        // LM: sin capacidad, no se muestra %
     const dt = new Date(isoDay + 'T00:00:00')
     const dow = (dt.getDay() + 6) % 7
     const cap = linea ? capacidad[`${linea}|${toISODate(mondayOf(dt))}`] : undefined
@@ -934,7 +937,8 @@ export default function ProgramadorPage() {
         </div>
       )}
 
-      {/* Panel de capacidad / turnos (F4) */}
+      {/* Panel de capacidad / turnos (F4). LM no tiene capacidad: no se muestra. */}
+      {!esLM(linea) && (
       <div className="mb-3 rounded-xl border border-stone-200 bg-white px-3 py-2.5">
         <div className="flex items-center justify-between flex-wrap gap-x-5 gap-y-2">
           <div className="flex items-center gap-2 flex-wrap">
@@ -969,6 +973,7 @@ export default function ProgramadorPage() {
           </div>
         </div>
       </div>
+      )}
 
       <div className="grid grid-cols-[280px_1fr] gap-4">
         {/* ── Backlog ── */}
