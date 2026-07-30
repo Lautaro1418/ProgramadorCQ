@@ -914,10 +914,12 @@ export default function ProgramadorPage() {
     const isToday = d.iso === toISODate(new Date())
     return (
       <div key={d.iso} className="flex-1 flex flex-col border-l border-stone-100" style={{ minWidth: colMin }}>
+        {/* sticky: la columna crece mucho al apilar órdenes; sin esto el encabezado
+            (día/fecha/%) se iba de la pantalla al scrollear, igual que el panel de la izq. */}
         <button
           onClick={() => (zoom === 'dia' ? setZoom('semana') : verDia(d.iso))}
           title={zoom === 'dia' ? 'Volver a la semana' : 'Ver este día en detalle'}
-          className={`block w-full text-center pb-1 mb-0.5 rounded hover:bg-stone-100 ${isToday ? 'text-red-800' : 'text-stone-600'}`}>
+          className={`block w-full text-center pb-1 mb-0.5 rounded hover:bg-stone-100 sticky top-3 z-[5] bg-white ${isToday ? 'text-red-800' : 'text-stone-600'}`}>
           <div className="text-[11px] font-semibold">{d.dow}</div>
           <div className="text-[10px] tabular-nums">{d.label}</div>
           <PctBadge pct={pctDia(d.iso)} />
