@@ -155,9 +155,16 @@ function codEqDeInsumo(insumo: string | null | undefined): string | null {
 // sus datos, y crece si la orden/setup demanda más minutos. El % diario es el medidor de capacidad.
 const PX_PER_MIN  = 0.32
 const MIN_ORDER_H = 84   // alcanza para N°, SKU, vino, botella, cantidad
-const MIN_SETUP_H = 20
+// Escala propia para el setup: la orden puede durar cientos de minutos (0.32 px/min ya
+// separa bien esos casos), pero un setup real es casi siempre 15-60 min (datos reales:
+// p50=20, p90=60, algún cambio de vino a 180) — con 0.32 px/min todo eso caía en el mismo
+// piso de 20px, sin diferenciarse. 0.85 px/min sí separa 15m de 60m de 180m a simple vista.
+const SETUP_PX_PER_MIN = 0.85
+const MIN_SETUP_H = 14
 function alturaBloque(min: number, isSetup: boolean): number {
-  return Math.round(Math.max(isSetup ? MIN_SETUP_H : MIN_ORDER_H, min * PX_PER_MIN))
+  return isSetup
+    ? Math.round(Math.max(MIN_SETUP_H, min * SETUP_PX_PER_MIN))
+    : Math.round(Math.max(MIN_ORDER_H, min * PX_PER_MIN))
 }
 
 // Código de vino para mostrar: ISVTPA2091 → A2091, ISVTPC1071-25 → C1071,
@@ -912,14 +919,15 @@ export default function ProgramadorPage() {
   const renderDia = (d: { iso: string; dow: string; label: string }) => {
     const bloques = progLinea.filter(p => p.fecha === d.iso).sort((a, b) => a.orden_en_dia - b.orden_en_dia)
     const isToday = d.iso === toISODate(new Date())
+    const lineaCapPx = offsetCapacidad(bloques, capMinDia(d.iso), zoom)
     return (
       <div key={d.iso} className="flex-1 flex flex-col border-l border-stone-100" style={{ minWidth: colMin }}>
-        {/* sticky: la columna crece mucho al apilar órdenes; sin esto el encabezado
-            (día/fecha/%) se iba de la pantalla al scrollear, igual que el panel de la izq. */}
+        {/* sticky top-0: la grilla ahora scrollea internamente (ver el div de arriba), así
+            que el header se pega al tope de ESE scroll propio mientras apilás órdenes. */}
         <button
           onClick={() => (zoom === 'dia' ? setZoom('semana') : verDia(d.iso))}
           title={zoom === 'dia' ? 'Volver a la semana' : 'Ver este día en detalle'}
-          className={`block w-full text-center pb-1 mb-0.5 rounded hover:bg-stone-100 sticky top-3 z-[5] bg-white ${isToday ? 'text-red-800' : 'text-stone-600'}`}>
+          className={`block w-full text-center pb-1 mb-0.5 rounded hover:bg-stone-100 sticky top-0 z-[5] bg-white ${isToday ? 'text-red-800' : 'text-stone-600'}`}>
           <div className="text-[11px] font-semibold">{d.dow}</div>
           <div className="text-[10px] tabular-nums">{d.label}</div>
           <PctBadge pct={pctDia(d.iso)} />
@@ -940,11 +948,19 @@ export default function ProgramadorPage() {
             }
             setDragWo(null); setDragGrupo(null); setDragBlock(null)
           }}
-          className={`flex-1 flex flex-col gap-0.5 mx-0.5 p-0.5 rounded-md border border-dashed transition-colors ${
+          className={`relative flex-1 flex flex-col gap-0.5 mx-0.5 p-0.5 rounded-md border border-dashed transition-colors ${
             (dragWo || dragGrupo || dragBlock != null) ? 'border-red-300 bg-red-50/40' : 'border-stone-200 bg-stone-50/40'
           }`}
           style={{ minHeight: dropMinH }}
         >
+          {lineaCapPx != null && (
+            <div className="absolute left-0 right-0 border-t-2 border-dashed border-red-400 pointer-events-none z-[4]"
+              style={{ top: lineaCapPx }} title="100% de la capacidad del día">
+              <span className="absolute -top-[9px] right-0.5 text-[8px] font-bold text-red-500 bg-white/90 px-0.5 rounded leading-none">
+                100%
+              </span>
+            </div>
+          )}
           {bloques.map((p, i) => (
             <Fragment key={p.id}>
               {i > 0 && p.setup_min > 0 && zoom !== 'mes' && (
@@ -966,20 +982,51 @@ export default function ProgramadorPage() {
     )
   }
 
-  // % de uso de un día (capacidad del turno de la semana de ese día). -1 = sin turno ese día.
-  const pctDia = (isoDay: string): number => {
-    if (linea && esLM(linea)) return -1        // LM: sin capacidad, no se muestra %
+  // Capacidad del día en minutos (turno de la semana de ese día). 0 = sin turno ese día.
+  const capMinDia = (isoDay: string): number => {
+    if (linea && esLM(linea)) return 0          // LM: sin capacidad
     const dt = new Date(isoDay + 'T00:00:00')
     const dow = (dt.getDay() + 6) % 7
     const cap = linea ? capacidad[`${linea}|${toISODate(mondayOf(dt))}`] : undefined
     const turno = linea ? (cap?.turno ?? defaultTurno(linea)) : ''
     const paradas = (cap?.paradas_op ?? 0) + (cap?.paradas_ext ?? 0)
-    const capMin = (linea ? horasDia(linea, turno, dow) : 0) * 60 * Math.max(0, 1 - paradas / 100)
+    return (linea ? horasDia(linea, turno, dow) : 0) * 60 * Math.max(0, 1 - paradas / 100)
+  }
+  // % de uso de un día. -1 = sin turno ese día.
+  const pctDia = (isoDay: string): number => {
+    if (linea && esLM(linea)) return -1
+    const capMin = capMinDia(isoDay)
     const used = programadasVisible
       .filter(p => p.linea === linea && p.fecha === isoDay)
       .reduce((s, p) => s + p.setup_min + p.duracion_min, 0)
     if (capMin <= 0) return used > 0 ? Infinity : -1
     return (used / capMin) * 100
+  }
+
+  // Alto (px) hasta donde se llega al 100% de capacidad, para dibujar la línea. Camina
+  // los bloques en el MISMO orden/alto que se renderizan (setup+orden, gap incluido) hasta
+  // que la suma de minutos reales cruza capMin, e interpola dentro de ese bloque. Si el día
+  // no llega a capMin con lo armado, extrapola el resto en el espacio vacío con la escala
+  // "sin piso" (PX_PER_MIN) — ahí no hay una tarjeta real que imponga un alto mínimo, así
+  // que es una aproximación, no una posición exacta.
+  const GAP_PX = 2   // gap-0.5 de Tailwind entre bloques
+  function offsetCapacidad(bloques: Programada[], capMin: number, zoomActual: typeof zoom): number | null {
+    if (capMin <= 0 || zoomActual === 'mes') return null
+    let acumMin = 0, acumPx = 0
+    for (let i = 0; i < bloques.length; i++) {
+      const p = bloques[i]
+      if (i > 0 && p.setup_min > 0) {
+        const h = alturaBloque(p.setup_min, true)
+        if (acumMin + p.setup_min >= capMin) return acumPx + h * (capMin - acumMin) / p.setup_min
+        acumMin += p.setup_min; acumPx += h + GAP_PX
+      }
+      const hOrd = alturaBloque(p.duracion_min, false)
+      if (acumMin + p.duracion_min >= capMin) {
+        return acumPx + (p.duracion_min > 0 ? hOrd * (capMin - acumMin) / p.duracion_min : 0)
+      }
+      acumMin += p.duracion_min; acumPx += hOrd + GAP_PX
+    }
+    return acumPx + (capMin - acumMin) * PX_PER_MIN
   }
 
   // Pantalla de selección de línea al entrar
@@ -1248,12 +1295,14 @@ export default function ProgramadorPage() {
         </div>
 
         {/* ── Grilla ── */}
-        {/* overflow-y-visible es necesario: overflow-x-auto solo, sin overflow-y explícito,
-            hace que el navegador ponga overflow-y:auto igual (regla del spec de CSS) y este
-            div pasa a ser su propio contenedor de scroll — entonces el sticky de los
-            encabezados de día queda anclado a ESTE div (que nunca scrollea solo) en vez de
-            a la página, y no se pega nunca. */}
-        <div className="bg-white border border-stone-200 rounded-xl p-3 overflow-x-auto overflow-y-visible">
+        {/* Scroll interno (no de la página): probado que overflow-x-auto solo (con o sin
+            overflow-y:visible explícito) NUNCA deja pegar un sticky dentro — el spec de CSS
+            fuerza el otro eje a un contenedor de scroll de cualquier forma, y ESE div (que
+            nunca scrollea) termina siendo la referencia del sticky en vez de la página.
+            La solución que sí funciona (verificada) es la misma que ya usa el panel de la
+            izquierda: alto acotado + overflow:auto de verdad, con el header sticky DENTRO
+            de ese scroll propio. */}
+        <div className="bg-white border border-stone-200 rounded-xl p-3 overflow-auto max-h-[85vh]">
           {zoom === 'mes' ? (
             // 4 semanas, una encima de otra (calendario L M Mi J V S D × 4)
             <div className="flex flex-col gap-3" style={{ minWidth: gridMin }}>
