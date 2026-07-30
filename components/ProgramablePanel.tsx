@@ -28,7 +28,8 @@ function lineaCls(l: string | undefined, actual: string) {
 }
 
 export default function ProgramablePanel({
-  datos, linea, guardadoEl, puedeEditar, programables, dragWo, onDragStart, onDragEnd,
+  datos, linea, guardadoEl, puedeEditar, programables, dragWo, dragGrupo,
+  onDragStart, onDragGrupoStart, onDragEnd,
 }: {
   datos: ProgramableData | null
   linea: string
@@ -36,7 +37,9 @@ export default function ProgramablePanel({
   puedeEditar: boolean
   programables: Set<string>          // WOs que están en el backlog => se pueden arrastrar
   dragWo: string | null
+  dragGrupo: string[] | null
   onDragStart: (wo: string) => void
+  onDragGrupoStart: (wos: string[]) => void
   onDragEnd: () => void
 }) {
   if (!datos) {
@@ -48,12 +51,13 @@ export default function ProgramablePanel({
     )
   }
 
-  // El array ya viene agrupado y ordenado: solo se corta un encabezado cuando cambia el código.
-  const filas: { grupo?: ProgItem; item: ProgItem }[] = []
-  let codActual: string | undefined
+  // El array ya viene agrupado y ordenado: se corta un grupo nuevo cuando cambia el código,
+  // sin reordenar nada, para respetar exactamente lo que generó ProgramacionCQ.
+  const grupos: { cod: string; desc: string; items: ProgItem[] }[] = []
   for (const it of datos.directo) {
-    if (it.cod !== codActual) { filas.push({ grupo: it, item: it }); codActual = it.cod }
-    else filas.push({ item: it })
+    const ult = grupos[grupos.length - 1]
+    if (!ult || ult.cod !== (it.cod ?? '')) grupos.push({ cod: it.cod ?? '', desc: it.desc ?? '', items: [it] })
+    else ult.items.push(it)
   }
 
   return (
@@ -91,18 +95,37 @@ export default function ProgramablePanel({
         {datos.sinClasif.length > 0 && <span>· {datos.sinClasif.length} sin clasificar</span>}
       </div>
 
-      {filas.map(({ grupo, item }, i) => {
-        const arrastrable = puedeEditar && programables.has(item.wo)
-        const esDeEstaLinea = item.linea === linea
+      {grupos.map((g, gi) => {
+        const wosDelGrupo = g.items.map(x => x.wo).filter(w => programables.has(w))
+        const grupoArrastrable = puedeEditar && wosDelGrupo.length > 0
+        const litrosGrupo = g.items.reduce((s, x) => s + (x.litros ?? 0), 0)
+        const arrastrandoEste = !!dragGrupo && dragGrupo.length === wosDelGrupo.length
+          && wosDelGrupo.every(w => dragGrupo.includes(w))
         return (
-          <div key={`${item.wo}-${i}`}>
-            {grupo && (
-              <div className="flex items-baseline gap-1.5 mt-2 mb-1 border-t border-stone-200 pt-1.5">
-                <span className="text-[11px] font-bold text-stone-700">{grupo.cod}</span>
-                <span className="text-[10px] text-stone-500 truncate">{grupo.desc}</span>
-              </div>
-            )}
+          <div key={`${g.cod}-${gi}`}>
             <div
+              draggable={grupoArrastrable}
+              onDragStart={() => grupoArrastrable && onDragGrupoStart(wosDelGrupo)}
+              onDragEnd={onDragEnd}
+              title={grupoArrastrable
+                ? `Arrastrá para programar las ${wosDelGrupo.length} órdenes del grupo juntas`
+                : 'Ninguna orden de este grupo está en el backlog'}
+              className={`flex items-baseline gap-1.5 mt-2 mb-1 border-t pt-1.5 px-1 rounded ${
+                grupoArrastrable ? 'cursor-grab active:cursor-grabbing hover:bg-stone-50' : 'cursor-default'
+              } ${arrastrandoEste ? 'border-red-400 bg-red-50' : 'border-stone-200'}`}
+            >
+              {grupoArrastrable && <span className="text-stone-300 text-[11px]">⠿</span>}
+              <span className="text-[11px] font-bold text-stone-700">{g.cod}</span>
+              <span className="text-[10px] text-stone-500 truncate flex-1">{g.desc}</span>
+              <span className="text-[10px] text-stone-400 tabular-nums whitespace-nowrap">
+                {g.items.length} · {fmt(litrosGrupo)} L
+              </span>
+            </div>
+            {g.items.map((item, i) => {
+              const arrastrable = puedeEditar && programables.has(item.wo)
+              const esDeEstaLinea = item.linea === linea
+              return (
+                <div key={`${item.wo}-${i}`} className="mb-1.5"><div
               draggable={arrastrable}
               onDragStart={() => arrastrable && onDragStart(item.wo)}
               onDragEnd={onDragEnd}
@@ -131,7 +154,9 @@ export default function ProgramablePanel({
               {!programables.has(item.wo) && (
                 <div className="text-[10px] text-amber-600 mt-0.5">no está en el backlog</div>
               )}
-            </div>
+                </div></div>
+              )
+            })}
           </div>
         )
       })}

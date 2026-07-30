@@ -218,6 +218,8 @@ export default function ProgramadorPage() {
   const [programableEl, setProgramableEl] = useState<string | null>(null)
   const [vista, setVista] = useState<'backlog' | 'programable'>('backlog')
   const [dragWo, setDragWo]   = useState<string | null>(null)
+  // Arrastre de un bloque entero de código equivalente (desde Programable).
+  const [dragGrupo, setDragGrupo] = useState<string[] | null>(null)
   const [info, setInfo]       = useState<{ id: number; x: number; y: number } | null>(null)
   const [dragBlock, setDragBlock] = useState<number | null>(null)
   const [locks, setLocks]     = useState<Record<string, LockRow>>({})
@@ -622,6 +624,52 @@ export default function ProgramadorPage() {
     setBacklog(prev => prev.filter(w => w.orden !== wo.orden))
   }
 
+  // ── Programar un grupo entero (bloque de código equivalente) ─────────────────
+  // La cadena se calcula acá para TODAS las órdenes de una: llamar N veces a
+  // programar() encadenaría mal, porque cada llamada leería un estado de React que
+  // todavía no se actualizó y todas arrancarían a la misma hora.
+  async function programarGrupo(wos: WoBacklog[], fechaIso: string) {
+    if (!linea || !wos.length) return
+    if (!fechaPermitida(linea, fechaIso)) {
+      alert('La línea móvil no trabaja los domingos: el programa (PROG-LM) va de lunes a sábado.')
+      return
+    }
+    if (draftEnabled && lockMioDe(locks, linea, perfil?.email)
+        && !programadas.some(p => p.linea === linea && p.estado === 'borrador')) {
+      await ensureDraft(linea)
+    }
+    const delDia = programadasVisible
+      .filter(p => p.linea === linea && p.fecha === fechaIso)
+      .sort((a, b) => a.orden_en_dia - b.orden_en_dia)
+
+    let prevWo = delDia[delDia.length - 1]?.wo ?? null
+    let cursor = delDia.length
+      ? new Date(delDia[delDia.length - 1].hora_fin)
+      : new Date(`${fechaIso}T${String(HORA_INICIO_DEFAULT).padStart(2, '0')}:00:00`)
+    let orden = (delDia[delDia.length - 1]?.orden_en_dia ?? 0)
+
+    const filas = wos.map(wo => {
+      const { min: setupMin } = setupEntre(prevWo, wo.orden, linea, setupMaps)
+      const durMin = minutosProduccion(wo.cajas, linea, wo.orden, maps)
+      const inicio = cursor
+      const fin = new Date(inicio.getTime() + (setupMin + durMin) * 60000)
+      cursor = fin; prevWo = wo.orden; orden += 1
+      const f: Record<string, unknown> = {
+        wo: wo.orden, linea, fecha: fechaIso,
+        hora_inicio: inicio.toISOString(), hora_fin: fin.toISOString(),
+        duracion_min: durMin, setup_min: setupMin, orden_en_dia: orden,
+        descripcion: wo.descripcion, cajas: wo.cajas, fraccionado: wo.fraccionado,
+        usuario_email: perfil?.email ?? null, usuario_nombre: perfil?.nombre ?? null,
+      }
+      if (draftEnabled) f.estado = lockMioDe(locks, linea, perfil?.email) ? 'borrador' : 'oficial'
+      return f
+    })
+
+    const { error } = await supabase.from('produccion_programada').insert(filas)
+    if (error) { alert('Error al programar el grupo: ' + error.message); return }
+    await cargar()
+  }
+
   // ── Quitar una WO programada (vuelve al backlog) ────────────────────────────
   async function quitar(p: Programada) {
     const { error } = await supabase.from('produccion_programada').delete().eq('id', p.id)
@@ -878,13 +926,20 @@ export default function ProgramadorPage() {
           onDragOver={e => e.preventDefault()}
           onDrop={() => {
             if (puedeEditar) {
-              if (dragWo) { const wo = backlog.find(w => w.orden === dragWo); if (wo) programar(wo, d.iso) }
+              if (dragGrupo) {
+                // Respeta el orden del grupo tal como viene del Programable.
+                const wos = dragGrupo
+                  .map(o => backlog.find(w => w.orden === o))
+                  .filter((w): w is WoBacklog => !!w)
+                if (wos.length) programarGrupo(wos, d.iso)
+              }
+              else if (dragWo) { const wo = backlog.find(w => w.orden === dragWo); if (wo) programar(wo, d.iso) }
               else if (dragBlock != null) { moverBloque(dragBlock, d.iso, null) }
             }
-            setDragWo(null); setDragBlock(null)
+            setDragWo(null); setDragGrupo(null); setDragBlock(null)
           }}
           className={`flex-1 flex flex-col gap-0.5 mx-0.5 p-0.5 rounded-md border border-dashed transition-colors ${
-            (dragWo || dragBlock != null) ? 'border-red-300 bg-red-50/40' : 'border-stone-200 bg-stone-50/40'
+            (dragWo || dragGrupo || dragBlock != null) ? 'border-red-300 bg-red-50/40' : 'border-stone-200 bg-stone-50/40'
           }`}
           style={{ minHeight: dropMinH }}
         >
@@ -1138,8 +1193,10 @@ export default function ProgramadorPage() {
               <ProgramablePanel
                 datos={programable} linea={linea} guardadoEl={programableEl}
                 puedeEditar={puedeEditar} programables={backlogWos}
-                dragWo={dragWo}
-                onDragStart={wo => setDragWo(wo)} onDragEnd={() => setDragWo(null)}
+                dragWo={dragWo} dragGrupo={dragGrupo}
+                onDragStart={wo => { setDragGrupo(null); setDragWo(wo) }}
+                onDragGrupoStart={wos => { setDragWo(null); setDragGrupo(wos) }}
+                onDragEnd={() => { setDragWo(null); setDragGrupo(null) }}
               />
             )}
             {!loading && vistaEfectiva === 'backlog' && backlogVisible.length === 0 && (
