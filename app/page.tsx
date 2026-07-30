@@ -82,6 +82,8 @@ interface WoBacklog {
   fe_solicitada: string | null
   planta: string | null
   estado: number | null           // estado JDE: 40/41 listas · 45 en proceso · 60 control pend. · 98 OK
+  sku: string | null              // cod_item_largo
+  codEq: string | null            // código de vino equivalente (de producciones.insumo)
 }
 
 interface Programada {
@@ -206,8 +208,10 @@ export default function ProgramadorPage() {
   const [setupMaps, setSetupMaps] = useState<SetupMaps>(() => emptySetupMaps())
   const [loading, setLoading] = useState(true)
   const [search, setSearch]   = useState('')
-  // Filtro de estado del backlog. Vacío = todos (no esconde nada sin querer).
+  // Filtros del backlog. Vacío = todos (no esconde nada sin querer).
   const [estadosSel, setEstadosSel] = useState<Set<number>>(new Set())
+  const [feDesde, setFeDesde] = useState('')
+  const [feHasta, setFeHasta] = useState('')
   const [dragWo, setDragWo]   = useState<string | null>(null)
   const [info, setInfo]       = useState<{ id: number; x: number; y: number } | null>(null)
   const [dragBlock, setDragBlock] = useState<number | null>(null)
@@ -254,6 +258,8 @@ export default function ProgramadorPage() {
       fe_solicitada: (r.fe_solicitada as string) ?? null,
       planta: r.planta == null ? null : String(r.planta),
       estado: r.estado == null ? null : Number(r.estado),
+      sku: (r.cod_item_largo as string) ?? null,
+      codEq: null,                 // se completa abajo desde `producciones`
     })
     const woRows: WoBacklog[] = []
     for (let from = 0; ; from += 1000) {
@@ -279,6 +285,18 @@ export default function ProgramadorPage() {
     for (const r of (lmData ?? []) as Record<string, unknown>[]) {
       const w = mapWo(r); if (!vistos.has(w.orden)) woRows.push(w)
     }
+
+    // Código de vino del backlog (para poder buscar por él). En tandas: son ~1000
+    // órdenes y un `in` con todas no entra en la URL.
+    const vinoBacklog = new Map<string, string | null>()
+    for (let i = 0; i < woRows.length; i += 300) {
+      const lote = woRows.slice(i, i + 300).map(w => w.orden)
+      const { data: pv } = await supabase.from('producciones').select('orden,insumo').in('orden', lote)
+      for (const r of (pv ?? []) as { orden: unknown; insumo: string | null }[]) {
+        vinoBacklog.set(String(r.orden), vinoInfo(r.insumo).code)
+      }
+    }
+    for (const w of woRows) w.codEq = vinoBacklog.get(w.orden) ?? null
 
     // Ya programadas (todas las líneas, para excluir del backlog y pintar la grilla)
     const { data: prog, error: progErr } = await supabase
@@ -749,8 +767,13 @@ export default function ProgramadorPage() {
   const backlogLinea = useMemo(() => backlog.filter(w =>
     !progWosVisible.has(w.orden) &&
     (linea == null || w.planta === plantaDeLinea(linea)) &&
-    (!q || w.orden.toLowerCase().includes(q) || (w.descripcion ?? '').toLowerCase().includes(q))
-  ), [backlog, q, progWosVisible, linea])
+    (!feDesde || (w.fe_solicitada ?? '') >= feDesde) &&
+    (!feHasta || (w.fe_solicitada ?? '') <= feHasta) &&
+    (!q || w.orden.toLowerCase().includes(q)
+        || (w.descripcion ?? '').toLowerCase().includes(q)
+        || (w.sku ?? '').toLowerCase().includes(q)
+        || (w.codEq ?? '').toLowerCase().includes(q))
+  ), [backlog, q, progWosVisible, linea, feDesde, feHasta])
 
   const estadosDisponibles = useMemo(() => {
     const c = new Map<number, number>()
@@ -1025,9 +1048,23 @@ export default function ProgramadorPage() {
           <input
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Buscar WO o descripción…"
+            placeholder="Buscar WO, SKU, vino o descripción…"
             className="w-full border border-stone-200 rounded-lg px-2.5 py-1.5 text-xs mb-2 focus:outline-none focus:border-red-400"
           />
+          <div className="flex items-center gap-1 mb-2">
+            <span className="text-[10px] uppercase tracking-wider text-stone-400">Fecha</span>
+            <input type="date" value={feDesde} onChange={e => setFeDesde(e.target.value)}
+              title="Desde (fecha de sistema)"
+              className="flex-1 min-w-0 border border-stone-200 rounded-lg px-1.5 py-1 text-[11px] focus:outline-none focus:border-red-400" />
+            <span className="text-[10px] text-stone-400">a</span>
+            <input type="date" value={feHasta} onChange={e => setFeHasta(e.target.value)}
+              title="Hasta (fecha de sistema)"
+              className="flex-1 min-w-0 border border-stone-200 rounded-lg px-1.5 py-1 text-[11px] focus:outline-none focus:border-red-400" />
+            {(feDesde || feHasta) && (
+              <button onClick={() => { setFeDesde(''); setFeHasta('') }} title="Quitar el filtro de fechas"
+                className="text-[11px] text-stone-400 hover:text-stone-700 px-1">✕</button>
+            )}
+          </div>
           {estadosDisponibles.length > 1 && (
             <div className="flex items-center gap-1 flex-wrap mb-2">
               <span className="text-[10px] uppercase tracking-wider text-stone-400 mr-0.5">Estado</span>
@@ -1087,6 +1124,12 @@ export default function ProgramadorPage() {
                 <div className="text-[11px] text-stone-600 truncate mt-0.5" title={w.descripcion ?? ''}>
                   {w.descripcion ?? '—'}
                 </div>
+                {(w.sku || w.codEq) && (
+                  <div className="flex items-center gap-1.5 text-[10px] text-stone-400 mt-0.5 truncate">
+                    {w.sku && <span className="font-mono truncate" title={`SKU ${w.sku}`}>{w.sku}</span>}
+                    {w.codEq && <span className="font-semibold text-stone-500" title="Código de vino">{w.codEq}</span>}
+                  </div>
+                )}
                 <div className="text-[11px] text-stone-400 mt-0.5 tabular-nums">
                   {w.cajas.toLocaleString('es-AR')} cajas
                 </div>
