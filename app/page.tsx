@@ -1248,7 +1248,12 @@ export default function ProgramadorPage() {
         </div>
 
         {/* ── Grilla ── */}
-        <div className="bg-white border border-stone-200 rounded-xl p-3 overflow-x-auto">
+        {/* overflow-y-visible es necesario: overflow-x-auto solo, sin overflow-y explícito,
+            hace que el navegador ponga overflow-y:auto igual (regla del spec de CSS) y este
+            div pasa a ser su propio contenedor de scroll — entonces el sticky de los
+            encabezados de día queda anclado a ESTE div (que nunca scrollea solo) en vez de
+            a la página, y no se pega nunca. */}
+        <div className="bg-white border border-stone-200 rounded-xl p-3 overflow-x-auto overflow-y-visible">
           {zoom === 'mes' ? (
             // 4 semanas, una encima de otra (calendario L M Mi J V S D × 4)
             <div className="flex flex-col gap-3" style={{ minWidth: gridMin }}>
