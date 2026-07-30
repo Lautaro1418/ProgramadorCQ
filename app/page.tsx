@@ -10,6 +10,7 @@ import {
 import { buildSetupMaps, emptySetupMaps, setupEntre, type SetupMaps } from '@/lib/setups'
 import RefreshButton from '@/components/RefreshButton'
 import ExportLMButton from '@/components/ExportLMButton'
+import ProgramablePanel, { type ProgramableData } from '@/components/ProgramablePanel'
 
 // ── Constantes ───────────────────────────────────────────────────────────────
 const LINEAS = ['L1', 'L2', 'L0', 'TM', 'LM'] as const
@@ -212,6 +213,10 @@ export default function ProgramadorPage() {
   const [estadosSel, setEstadosSel] = useState<Set<number>>(new Set())
   const [feDesde, setFeDesde] = useState('')
   const [feHasta, setFeHasta] = useState('')
+  // "Programable" generado por ProgramacionCQ: se lee tal cual, no se recalcula acá.
+  const [programable, setProgramable] = useState<ProgramableData | null>(null)
+  const [programableEl, setProgramableEl] = useState<string | null>(null)
+  const [vista, setVista] = useState<'backlog' | 'programable'>('backlog')
   const [dragWo, setDragWo]   = useState<string | null>(null)
   const [info, setInfo]       = useState<{ id: number; x: number; y: number } | null>(null)
   const [dragBlock, setDragBlock] = useState<number | null>(null)
@@ -297,6 +302,14 @@ export default function ProgramadorPage() {
       }
     }
     for (const w of woRows) w.codEq = vinoBacklog.get(w.orden) ?? null
+
+    // Último "Programable" generado en ProgramacionCQ (se muestra tal cual).
+    const { data: progGen } = await supabase
+      .from('programador_programable_guardado')
+      .select('saved_at,datos').order('saved_at', { ascending: false }).limit(1)
+    const gen = (progGen ?? [])[0] as { saved_at: string; datos: ProgramableData } | undefined
+    setProgramable(gen?.datos ?? null)
+    setProgramableEl(gen?.saved_at ?? null)
 
     // Ya programadas (todas las líneas, para excluir del backlog y pintar la grilla)
     const { data: prog, error: progErr } = await supabase
@@ -781,6 +794,11 @@ export default function ProgramadorPage() {
     return [...c.entries()].sort((a, b) => a[0] - b[0])
   }, [backlogLinea])
 
+  // LM no tiene Programable: si estoy ahí, siempre backlog.
+  const vistaEfectiva = linea && esLM(linea) ? 'backlog' : vista
+  // WOs que existen en el backlog: solo esas se pueden arrastrar desde el Programable
+  // (las demás ya están programadas o quedan fuera de la ventana de fechas).
+  const backlogWos = useMemo(() => new Set(backlogLinea.map(w => w.orden)), [backlogLinea])
   const backlogVisible = useMemo(() => backlogLinea
     .filter(w => estadosSel.size === 0 || (w.estado != null && estadosSel.has(w.estado)))
     .sort((a, b) => (a.fe_solicitada ?? '9999').localeCompare(b.fe_solicitada ?? '9999')),
@@ -1037,14 +1055,30 @@ export default function ProgramadorPage() {
       <div className="grid grid-cols-[280px_1fr] gap-4">
         {/* ── Backlog ── */}
         <div className="bg-white border border-stone-200 rounded-xl p-3 h-[560px] flex flex-col">
+          {/* En LM no aplica: el Programable es de las líneas de fraccionamiento directo. */}
+          {!esLM(linea) ? (
+            <div className="flex rounded-lg bg-stone-100 p-0.5 mb-2">
+              {([['backlog', 'Sin programar'], ['programable', 'Programable']] as const).map(([v, lbl]) => (
+                <button key={v} onClick={() => setVista(v)}
+                  className={`flex-1 px-2 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                    vista === v ? 'bg-white text-stone-800 shadow-sm' : 'text-stone-500 hover:text-stone-700'
+                  }`}>
+                  {lbl}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-xs font-bold uppercase tracking-wider text-stone-500">
-              WOs sin programar
+              {vistaEfectiva === 'programable' ? 'Programable' : 'WOs sin programar'}
             </h2>
             <span className="text-[11px] text-stone-400">
-              {backlogVisible.length}{estadosSel.size > 0 && ` de ${backlogLinea.length}`}
+              {vistaEfectiva === 'programable'
+                ? (programable?.directo.length ?? 0)
+                : <>{backlogVisible.length}{estadosSel.size > 0 && ` de ${backlogLinea.length}`}</>}
             </span>
           </div>
+          {vistaEfectiva === 'backlog' && (<>
           <input
             value={search}
             onChange={e => setSearch(e.target.value)}
@@ -1097,12 +1131,21 @@ export default function ProgramadorPage() {
               )}
             </div>
           )}
+          </>)}
           <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
             {loading && <p className="text-xs text-stone-400">Cargando…</p>}
-            {!loading && backlogVisible.length === 0 && (
+            {!loading && vistaEfectiva === 'programable' && (
+              <ProgramablePanel
+                datos={programable} linea={linea} guardadoEl={programableEl}
+                puedeEditar={puedeEditar} programables={backlogWos}
+                dragWo={dragWo}
+                onDragStart={wo => setDragWo(wo)} onDragEnd={() => setDragWo(null)}
+              />
+            )}
+            {!loading && vistaEfectiva === 'backlog' && backlogVisible.length === 0 && (
               <p className="text-xs text-stone-400 italic">No hay WOs pendientes en esta ventana.</p>
             )}
-            {backlogVisible.map(w => (
+            {vistaEfectiva === 'backlog' && backlogVisible.map(w => (
               <div
                 key={w.orden}
                 draggable={puedeEditar}
