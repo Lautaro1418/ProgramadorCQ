@@ -17,6 +17,11 @@ type Linea = (typeof LINEAS)[number]
 const plantaDeLinea = (l: string) => (l === 'LM' ? '3012' : '1032')
 // LM no se mide por capacidad: no tiene turnos, ni velocidad, ni % de uso.
 const esLM = (l: string) => l === 'LM'
+// LM se vuelca a PROG-LM, cuyas hojas solo tienen bloques de lunes a sábado:
+// una orden en domingo no tendría dónde ir, así que no se permite.
+function fechaPermitida(l: string, iso: string): boolean {
+  return !esLM(l) || new Date(iso + 'T00:00:00').getDay() !== 0
+}
 
 // Backlog: ordenes con estado >= 40 (40/41 listas · 45 en proceso · 60 c/control pendiente · 98 OK),
 // excepto 99 (canceladas). Las < 40 no se muestran.
@@ -505,6 +510,10 @@ export default function ProgramadorPage() {
   // ── Programar una WO (drop sobre un día) ─────────────────────────────────────
   async function programar(wo: WoBacklog, fechaIso: string) {
     if (!linea) return
+    if (!fechaPermitida(linea, fechaIso)) {
+      alert('La línea móvil no trabaja los domingos: el programa (PROG-LM) va de lunes a sábado.')
+      return
+    }
     // F2: asegurar que el borrador exista antes de agregar (evita ver solo la WO nueva
     // si se suelta apenas se entra a la línea, antes de que termine el fork)
     if (draftEnabled && lockMioDe(locks, linea, perfil?.email)
@@ -601,6 +610,10 @@ export default function ProgramadorPage() {
   // ── Mover un bloque (arrastrar a otro día o reordenar dentro del día) ─────────
   async function moverBloque(blockId: number, targetFecha: string, beforeId: number | null) {
     if (!linea || !puedeEditar || beforeId === blockId) return
+    if (!fechaPermitida(linea, targetFecha)) {
+      alert('La línea móvil no trabaja los domingos: el programa (PROG-LM) va de lunes a sábado.')
+      return
+    }
     const moved = programadas.find(p => p.id === blockId)
     if (!moved) return
     const oldFecha = moved.fecha
