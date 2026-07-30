@@ -28,7 +28,7 @@ function lineaCls(l: string | undefined, actual: string) {
 }
 
 export default function ProgramablePanel({
-  datos, linea, guardadoEl, puedeEditar, programables, dragWo, dragGrupo,
+  datos, linea, guardadoEl, puedeEditar, programables, yaProgramadas, dragWo, dragGrupo,
   onDragStart, onDragGrupoStart, onDragEnd,
 }: {
   datos: ProgramableData | null
@@ -36,6 +36,7 @@ export default function ProgramablePanel({
   guardadoEl: string | null
   puedeEditar: boolean
   programables: Set<string>          // WOs que están en el backlog => se pueden arrastrar
+  yaProgramadas: Set<string>         // WOs ya puestas en el Gantt => salen de la lista
   dragWo: string | null
   dragGrupo: string[] | null
   onDragStart: (wo: string) => void
@@ -51,10 +52,14 @@ export default function ProgramablePanel({
     )
   }
 
+  // Lo ya programado sale de la lista: acá queda solo lo que falta ubicar.
+  const pendientes = datos.directo.filter(it => !yaProgramadas.has(it.wo))
+  const hechas = datos.directo.length - pendientes.length
+
   // El array ya viene agrupado y ordenado: se corta un grupo nuevo cuando cambia el código,
   // sin reordenar nada, para respetar exactamente lo que generó ProgramacionCQ.
   const grupos: { cod: string; desc: string; items: ProgItem[] }[] = []
-  for (const it of datos.directo) {
+  for (const it of pendientes) {
     const ult = grupos[grupos.length - 1]
     if (!ult || ult.cod !== (it.cod ?? '')) grupos.push({ cod: it.cod ?? '', desc: it.desc ?? '', items: [it] })
     else ult.items.push(it)
@@ -88,12 +93,19 @@ export default function ProgramablePanel({
         })}
       </div>
 
-      <div className="flex items-center gap-2 text-[10px] text-stone-400">
-        <span>{datos.directo.length} órdenes de fraccionado</span>
+      <div className="flex items-center gap-2 text-[10px] text-stone-400 flex-wrap">
+        <span>{pendientes.length} de {datos.directo.length} sin programar</span>
+        {hechas > 0 && <span className="text-emerald-600 font-medium">· {hechas} ya en el Gantt</span>}
         <span>· {datos.tm.length} TM</span>
         <span>· {datos.estibas.length} estibas</span>
         {datos.sinClasif.length > 0 && <span>· {datos.sinClasif.length} sin clasificar</span>}
       </div>
+
+      {pendientes.length === 0 && (
+        <p className="text-xs text-emerald-700 italic py-2">
+          Listo: todas las órdenes del Programable ya están en el Gantt.
+        </p>
+      )}
 
       {grupos.map((g, gi) => {
         const wosDelGrupo = g.items.map(x => x.wo).filter(w => programables.has(w))

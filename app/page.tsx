@@ -1192,7 +1192,7 @@ export default function ProgramadorPage() {
             {!loading && vistaEfectiva === 'programable' && (
               <ProgramablePanel
                 datos={programable} linea={linea} guardadoEl={programableEl}
-                puedeEditar={puedeEditar} programables={backlogWos}
+                puedeEditar={puedeEditar} programables={backlogWos} yaProgramadas={progWosVisible}
                 dragWo={dragWo} dragGrupo={dragGrupo}
                 onDragStart={wo => { setDragGrupo(null); setDragWo(wo) }}
                 onDragGrupoStart={wos => { setDragWo(null); setDragGrupo(wos) }}
