@@ -83,36 +83,56 @@ function backup(archivo) {
   return dest;
 }
 
+/**
+ * Exporta el programa de LM. Con aplicar=false solo calcula (previsualización).
+ * Devuelve un resumen usable por la consola o por el watcher.
+ */
+async function exportar({ archivo = ARCHIVO_DEFAULT, aplicar = false } = {}) {
+  if (!fs.existsSync(archivo)) throw new Error('no existe el archivo: ' + archivo);
+  const semanas = semanasDelArchivo(archivo);
+  const programa = await leerPrograma();
+  const { porSemana, descartadas } = mapear(programa, semanas);
+  const total = Object.values(porSemana).reduce((n, o) => n + o.length, 0);
+
+  let copia = null;
+  if (aplicar && total) {
+    copia = backup(archivo);
+    for (const [sem, ordenes] of Object.entries(porSemana)) escribir(archivo, Number(sem), ordenes);
+  }
+  return { archivo, semanas, porSemana, descartadas, total, backup: copia, aplicado: !!copia };
+}
+
+/** Resumen de una línea, para el detalle que ve el usuario en la app. */
+function resumen(r) {
+  const partes = Object.entries(r.porSemana).map(([s, o]) => `S${s}: ${o.length}`);
+  return `${r.total} órdenes (${partes.join(', ') || 'ninguna'})`
+    + (r.descartadas.length ? ` · ${r.descartadas.length} sin exportar` : '');
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const archivo = args.includes('--archivo') ? args[args.indexOf('--archivo') + 1] : ARCHIVO_DEFAULT;
-  const escribirDeVerdad = args.includes('--escribir');
-  if (!fs.existsSync(archivo)) throw new Error('no existe el archivo: ' + archivo);
+  const aplicar = args.includes('--escribir');
 
-  const semanas = semanasDelArchivo(archivo);
-  console.log('Archivo : ' + archivo);
-  console.log('Semanas : ' + Object.entries(semanas).map(([s, l]) => `S${s}=${l}`).join('  '));
+  const r = await exportar({ archivo, aplicar });
+  console.log('Archivo : ' + r.archivo);
+  console.log('Semanas : ' + Object.entries(r.semanas).map(([s, l]) => `S${s}=${l}`).join('  '));
+  console.log('Programa: ' + r.total + ' órdenes de LM (oficial) en la app\n');
+  if (!r.total) { console.log('No hay nada programado en LM: no se escribe nada.'); return; }
 
-  const programa = await leerPrograma();
-  console.log('Programa: ' + programa.length + ' órdenes de LM (oficial) en la app\n');
-  if (!programa.length) { console.log('No hay nada programado en LM: no se escribe nada.'); return; }
-
-  const { porSemana, descartadas } = mapear(programa, semanas);
-  for (const [sem, ordenes] of Object.entries(porSemana)) {
-    console.log(`Semana${sem} (${semanas[sem]}): ${ordenes.length} órdenes`);
+  for (const [sem, ordenes] of Object.entries(r.porSemana)) {
+    console.log(`Semana${sem} (${r.semanas[sem]}): ${ordenes.length} órdenes`);
     for (const o of ordenes) console.log(`   ${o.dia}${String(o.sec).padStart(2)}  WO ${o.wo}  ${o.cajas} cj`);
   }
-  if (descartadas.length) {
-    console.log('\nNO se exportan (' + descartadas.length + '):');
-    for (const d of descartadas) console.log(`   WO ${d.wo}  ${d.fecha}  -> ${d.motivo}`);
+  if (r.descartadas.length) {
+    console.log('\nNO se exportan (' + r.descartadas.length + '):');
+    for (const d of r.descartadas) console.log(`   WO ${d.wo}  ${d.fecha}  -> ${d.motivo}`);
   }
-
-  if (!escribirDeVerdad) {
+  if (!r.aplicado) {
     console.log('\n--- PREVISUALIZACIÓN: no se escribió nada. Agregá --escribir para aplicarlo. ---');
     return;
   }
-  console.log('\nBackup: ' + path.basename(backup(archivo)));
-  for (const [sem, ordenes] of Object.entries(porSemana)) escribir(archivo, Number(sem), ordenes);
+  console.log('\nBackup: ' + path.basename(r.backup));
   console.log('Escrito. Abrí el archivo en Excel para que recalcule.');
 }
 
@@ -147,4 +167,4 @@ if (require.main === module) {
   if (process.argv.includes('--demo')) demo();
   else main().catch(e => { console.error('ERROR: ' + e.message); process.exit(1); });
 }
-module.exports = { mapear, lunesDe, diaDe };
+module.exports = { exportar, resumen, mapear, lunesDe, diaDe, ARCHIVO_DEFAULT };

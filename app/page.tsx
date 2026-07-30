@@ -9,6 +9,7 @@ import {
 } from '@/lib/duracion'
 import { buildSetupMaps, emptySetupMaps, setupEntre, type SetupMaps } from '@/lib/setups'
 import RefreshButton from '@/components/RefreshButton'
+import ExportLMButton from '@/components/ExportLMButton'
 
 // ── Constantes ───────────────────────────────────────────────────────────────
 const LINEAS = ['L1', 'L2', 'L0', 'TM', 'LM'] as const
@@ -908,6 +909,7 @@ export default function ProgramadorPage() {
 
         <div className="flex items-center gap-2 flex-wrap">
           <RefreshButton onComplete={cargar} />
+          {esLM(linea) && puedeEditar && <ExportLMButton perfil={perfil} />}
           {/* Zoom: Día / Semana / 4 sem */}
           <div className="flex rounded-lg bg-stone-100 p-0.5">
             {([['dia', 'Día'], ['semana', 'Semana'], ['mes', '4 sem']] as const).map(([z, lbl]) => (
